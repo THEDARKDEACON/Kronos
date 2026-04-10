@@ -10,12 +10,16 @@ from strategy.kronos_alpha import KronosAlphaGenerator
 from optim.portfolio import construct_portfolio
 
 class BacktestSimulator:
-    def __init__(self, target_dates=None, transaction_cost_bps=5.0):
+    def __init__(self, target_dates=None, transaction_cost_bps=5.0, max_drawdown_pct=10.0):
         self.target_dates = target_dates if target_dates else ["2023-01-01", "2023-06-01"]
         self.universe = get_universe() # Fetch base universe (S&P 500)
         self.generator = KronosAlphaGenerator(model_size="small", max_context=512)
         self.transaction_cost = transaction_cost_bps / 10000.0  # Convert bps to decimal (e.g., 5 bps = 0.0005)
         self.previous_portfolio = None  # Track previous weights for turnover calculation
+        self.max_drawdown = max_drawdown_pct / 100.0  # Convert % to decimal
+        self.peak_value = 1.0  # Track peak portfolio value
+        self.current_value = 1.0  # Current portfolio value
+        self.circuit_breaker_triggered = False  # Emergency stop flag
         
     def step(self, as_of_date: str):
         print(f"\n{'='*60}")
@@ -79,14 +83,52 @@ class BacktestSimulator:
     def run(self):
         history_ledger = {}
         for date in self.target_dates:
+            # Check circuit breaker before running step
+            if self.circuit_breaker_triggered:
+                print(f"\n[⚠️ CIRCUIT BREAKER] Simulation halted at {date} due to maximum drawdown exceeded.")
+                break
+                
             port = self.step(date)
             history_ledger[date] = port
             
-            print(f"\n[Simulator] Target Portfolio Generated for {date}:")
-            print(port.head(10))
-            print(f"Total Invested: {port['Weight'].sum():.2%}\n")
+            # Calculate portfolio returns and drawdown
+            if not port.empty and 'Predicted_Return' in port.columns:
+                # Simplified return calculation: weighted average of predicted returns
+                weighted_return = (port['Weight'] * port['Predicted_Return']).sum()
+                # Subtract transaction costs
+                if 'Turnover_Cost' in port.columns:
+                    net_return = weighted_return - port['Turnover_Cost'].iloc[0] if len(port) > 0 else weighted_return
+                else:
+                    net_return = weighted_return
+                    
+                self.current_value *= (1 + net_return)
+                
+                # Update peak value
+                if self.current_value > self.peak_value:
+                    self.peak_value = self.current_value
+                    
+                # Calculate drawdown
+                drawdown = (self.peak_value - self.current_value) / self.peak_value
+                
+                print(f"\n[Simulator] Target Portfolio Generated for {date}:")
+                print(port.head(10))
+                print(f"Gross Exposure: {port['Weight'].abs().sum():.2%}")
+                print(f"Portfolio Value: ${self.current_value:.4f} (Peak: ${self.peak_value:.4f})")
+                print(f"Current Drawdown: {drawdown:.2%} (Max Allowed: {self.max_drawdown:.2%})")
+                
+                # Trigger circuit breaker if drawdown exceeds limit
+                if drawdown > self.max_drawdown:
+                    self.circuit_breaker_triggered = True
+                    print(f"\n[🚨 CIRCUIT BREAKER TRIGGERED] Drawdown {drawdown:.2%} exceeds limit {self.max_drawdown:.2%}")
+                    print("[🚨 HALTING ALL TRADING OPERATIONS]")
+            else:
+                print(f"\n[Simulator] Target Portfolio Generated for {date}:")
+                print(port.head(10))
             
-        print("Simulation Sequence Complete.")
+        print("\nSimulation Sequence Complete.")
+        if self.circuit_breaker_triggered:
+            print(f"Final Portfolio Value: ${self.current_value:.4f}")
+            print(f"Maximum Drawdown: {(self.peak_value - self.current_value) / self.peak_value:.2%}")
         return history_ledger
 
 if __name__ == "__main__":

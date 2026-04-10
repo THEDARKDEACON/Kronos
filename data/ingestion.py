@@ -78,7 +78,16 @@ def get_fundamentals(universe_df: pd.DataFrame, as_of_date: Optional[str] = None
     df.to_parquet(cache_file)
     return df
 
-def get_historical_ohlcv(tickers: List[str], as_of_date: Optional[str] = None, lookback_days: int = 400) -> Dict[str, pd.DataFrame]:
+def get_historical_ohlcv(tickers: List[str], as_of_date: Optional[str] = None, lookback_days: int = 400, incremental: bool = True) -> Dict[str, pd.DataFrame]:
+    """
+    Fetch historical OHLCV data with intelligent caching and incremental updates.
+    
+    Args:
+        tickers: List of ticker symbols
+        as_of_date: Target end date for data
+        lookback_days: Historical days to fetch
+        incremental: If True, only fetch missing data since last cache
+    """
     if not tickers:
         print("Warning: Ticker list is empty. Skipping OHLCV fetch.")
         return {}
@@ -86,29 +95,59 @@ def get_historical_ohlcv(tickers: List[str], as_of_date: Optional[str] = None, l
     target_ts = pd.Timestamp(as_of_date) if as_of_date else pd.Timestamp.now()
     cache_file = os.path.join(CACHE_DIR, f"ohlcv_{target_ts.date()}.parquet")
     
+    # Try to load from cache first
     if os.path.exists(cache_file):
         print(f"Loading OHLCV Matrix from local Parquet Cache for [{target_ts.date()}]...")
         master_df = pd.read_parquet(cache_file)
-        # Reconstruct Dictionary
-        return {ticker: group.drop(columns=['Ticker']).reset_index(drop=True) for ticker, group in master_df.groupby('Ticker')}
+        ohlcv_dict = {ticker: group.drop(columns=['Ticker']).reset_index(drop=True) 
+                     for ticker, group in master_df.groupby('Ticker')}
+        
+        # Check if we have all requested tickers
+        missing_tickers = [t for t in tickers if t not in ohlcv_dict]
+        if not missing_tickers:
+            print(f"   [Cache Hit] All {len(tickers)} tickers loaded from cache")
+            return ohlcv_dict
+        else:
+            print(f"   [Partial Cache] {len(tickers) - len(missing_tickers)}/{len(tickers)} from cache, fetching {len(missing_tickers)} missing...")
+            tickers = missing_tickers  # Only fetch missing
+    else:
+        ohlcv_dict = {}
     
-    start_ts = target_ts - pd.Timedelta(days=lookback_days + 150) 
-    print(f"API Downloading chronologically safe OHLCV ending [{target_ts.date()}]...")
+    # Calculate required date range
+    if incremental and ohlcv_dict:
+        # Find the earliest date in existing data to determine what we need
+        existing_dates = [df['timestamps'].max() for df in ohlcv_dict.values() if 'timestamps' in df.columns and len(df) > 0]
+        if existing_dates:
+            last_cached_date = min(existing_dates)  # Conservative: use earliest max date
+            start_ts = last_cached_date - pd.Timedelta(days=5)  # Small overlap for safety
+            print(f"   [Incremental] Fetching from {start_ts.date()} to {target_ts.date()}...")
+        else:
+            start_ts = target_ts - pd.Timedelta(days=lookback_days + 150)
+    else:
+        start_ts = target_ts - pd.Timedelta(days=lookback_days + 150)
+        print(f"API Downloading chronologically safe OHLCV ending [{target_ts.date()}]...")
     
-    data = yf.download(tickers, start=start_ts.strftime('%Y-%m-%d'), end=(target_ts + pd.Timedelta(days=1)).strftime('%Y-%m-%d'), group_by='ticker', progress=False)
+    data = yf.download(tickers, start=start_ts.strftime('%Y-%m-%d'), 
+                      end=(target_ts + pd.Timedelta(days=1)).strftime('%Y-%m-%d'), 
+                      group_by='ticker', progress=False)
     
-    ohlcv_dict = {}
-    master_frames = []
+    new_frames = []
     
     for ticker in tickers:
-        if ticker in tickers and len(tickers) == 1: df = data
+        if len(tickers) == 1:
+            df = data
         else:
             try:
-                if hasattr(data.columns, 'levels'): df = data[ticker].dropna()
-                else: df = data.dropna()
-            except KeyError: continue
+                if hasattr(data.columns, 'levels'):
+                    df = data[ticker].dropna()
+                else:
+                    df = data.dropna()
+            except KeyError:
+                continue
 
-        if len(df) == 0: continue
+        if len(df) == 0:
+            continue
+            
         df = df.rename(columns={'Open':'open', 'High':'high', 'Low':'low', 'Close':'close', 'Volume':'volume'})
         df = df[['open', 'high', 'low', 'close', 'volume']].copy()
         df = df[df.index <= target_ts]
@@ -116,14 +155,34 @@ def get_historical_ohlcv(tickers: List[str], as_of_date: Optional[str] = None, l
         df['amount'] = 0.0 
         
         reset_df = df.reset_index(drop=True)
-        ohlcv_dict[ticker] = reset_df
         
-        # Prepare for massive master frame dump
-        cache_df = reset_df.copy()
+        # Merge with existing data if incremental
+        if incremental and ticker in ohlcv_dict:
+            existing_df = ohlcv_dict[ticker]
+            combined_df = pd.concat([existing_df, reset_df], ignore_index=True)
+            combined_df = combined_df.drop_duplicates(subset=['timestamps'], keep='last')
+            combined_df = combined_df.sort_values('timestamps').reset_index(drop=True)
+            ohlcv_dict[ticker] = combined_df
+            print(f"   [Merged] {ticker}: {len(existing_df)} + {len(reset_df)} = {len(combined_df)} rows")
+        else:
+            ohlcv_dict[ticker] = reset_df
+        
+        # Prepare for cache
+        cache_df = ohlcv_dict[ticker].copy()
         cache_df['Ticker'] = ticker
-        master_frames.append(cache_df)
+        new_frames.append(cache_df)
         
-    if master_frames:
-        pd.concat(master_frames).to_parquet(cache_file)
+    # Update cache with merged data
+    if new_frames:
+        if os.path.exists(cache_file) and incremental:
+            # Load existing and merge
+            existing_master = pd.read_parquet(cache_file)
+            new_master = pd.concat(new_frames)
+            combined_master = pd.concat([existing_master, new_master])
+            combined_master = combined_master.drop_duplicates(subset=['Ticker', 'timestamps'], keep='last')
+            combined_master.to_parquet(cache_file)
+        else:
+            pd.concat(new_frames).to_parquet(cache_file)
+        print(f"   [Cache Updated] Saved {len(ohlcv_dict)} tickers to {cache_file}")
         
     return ohlcv_dict

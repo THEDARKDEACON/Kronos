@@ -8,7 +8,13 @@ def construct_portfolio(
     fundamentals_df: pd.DataFrame, 
     ohlcv_dict: Dict[str, pd.DataFrame],
     risk_aversion: float = 1.0,
-    l2_penalty: float = 0.5
+    l2_penalty: float = 0.5,
+    prev_weights: Dict[str, float] = None,
+    transaction_cost: float = 0.0005,  # 5 bps per side
+    max_sector_exposure: float = 0.20,  # Max 20% gross exposure per sector
+    liquidity_scaling: bool = True,  # Enable liquidity-based position sizing
+    min_avg_volume: float = 1000000,  # Minimum 1M shares avg daily volume
+    max_position_by_volume: float = 0.02  # Max 2% of average daily volume
 ) -> pd.DataFrame:
     """
     Constructs a SOTA Market-Neutral Market Portfolio using Long/Short Optimization.
@@ -52,36 +58,89 @@ def construct_portfolio(
     volatility = recent_returns.std() * np.sqrt(252)
     
     bounds = []
+    liquidity_caps = {}
     for t in valid_tickers:
+        # Base volatility cap
         vol = volatility.get(t, 0.2) 
         dynamic_cap = min(0.05, 0.01 / max(vol, 0.01))
-        # Now allows SHORT selling up to the exact same dynamic limit
-        bounds.append((-dynamic_cap, dynamic_cap)) 
+        
+        # Liquidity-based position sizing
+        if liquidity_scaling and t in ohlcv_dict:
+            df = ohlcv_dict[t]
+            if 'volume' in df.columns and len(df) >= 20:
+                avg_volume = df['volume'].tail(20).mean()
+                avg_price = df['close'].tail(20).mean()
+                
+                # Skip illiquid stocks entirely
+                if avg_volume < min_avg_volume:
+                    print(f"   [Liquidity] Excluding {t}: avg volume {avg_volume:,.0f} < {min_avg_volume:,.0f}")
+                    bounds.append((0, 0))  # Zero position
+                    continue
+                
+                # Cap position based on % of average daily volume
+                # Assuming $1 portfolio, weight = dollar position
+                # Max position = max_position_by_volume * avg_volume * avg_price
+                liquidity_cap = (max_position_by_volume * avg_volume * avg_price) / 1.0  # Normalized to $1 portfolio
+                liquidity_caps[t] = min(dynamic_cap, liquidity_cap)
+                bounds.append((-liquidity_cap, liquidity_cap))
+                print(f"   [Liquidity] {t}: cap {liquidity_cap:.4f} (vol: {avg_volume:,.0f}, vol-based: {max_position_by_volume * avg_volume * avg_price:.4f})")
+            else:
+                bounds.append((-dynamic_cap, dynamic_cap))
+        else:
+            bounds.append((-dynamic_cap, dynamic_cap)) 
         
     mu = np.array([signals_df.loc[t, 'Predicted_Return'] for t in valid_tickers])
+    
+    # Build sector mapping for constraints
+    sector_map = {}
+    for i, t in enumerate(valid_tickers):
+        sector = fundamentals_df.loc[t, 'Sector'] if t in fundamentals_df.index else 'Unknown'
+        if sector not in sector_map:
+            sector_map[sector] = []
+        sector_map[sector].append(i)
     
     # === CVXPY CONVEX OPTIMIZATION ===
     # Stanford OSQP/ECOS solvers handle absolute values and 300+ variables natively
     n = len(valid_tickers)
     w = cp.Variable(n)
     
-    # Objective: Maximize return - risk_aversion * variance - l2_penalty * ||w||^2
+    # Objective: Maximize return - risk_aversion * variance - l2_penalty * ||w||^2 - transaction_costs
     port_return = mu @ w
     port_variance = cp.quad_form(w, cov_matrix.values)
     l2_reg = l2_penalty * cp.sum_squares(w)
-    objective = cp.Maximize(port_return - risk_aversion * port_variance - l2_reg)
+    
+    # Turnover penalty: penalize deviation from previous weights (5 bps per side)
+    if prev_weights is not None:
+        prev_w_array = np.array([prev_weights.get(t, 0.0) for t in valid_tickers])
+        turnover = cp.sum(cp.abs(w - prev_w_array))
+        turnover_penalty = transaction_cost * turnover
+        print(f"   [Optimizer] Including turnover penalty: {transaction_cost:.4f} per side")
+    else:
+        turnover_penalty = 0
+        print(f"   [Optimizer] No previous weights, skipping turnover penalty")
+    
+    objective = cp.Maximize(port_return - risk_aversion * port_variance - l2_reg - turnover_penalty)
     
     # Constraints:
     # 1. Market neutral: sum(weights) = 0
     # 2. Long/Short bounds per asset
     # 3. Gross exposure limit: sum(|weights|) <= max_gross_exposure
+    # 4. Sector exposure limits (max 20% gross per sector)
     constraints = [
         cp.sum(w) == 0,  # Market neutral
-        cp.sum(cp.abs(w)) <= max_gross_exposure,  # Gross exposure limit (CVXPY handles abs natively)
+        cp.sum(cp.abs(w)) <= max_gross_exposure,  # Gross exposure limit
     ]
+    
+    # Per-asset bounds
     for i, (low, high) in enumerate(bounds):
         constraints.append(w[i] >= low)
         constraints.append(w[i] <= high)
+    
+    # Sector exposure constraints (max 20% gross per sector)
+    for sector, indices in sector_map.items():
+        sector_weights = cp.sum([cp.abs(w[i]) for i in indices])
+        constraints.append(sector_weights <= max_sector_exposure)
+        print(f"   [Optimizer] Sector {sector}: {len(indices)} assets, max exposure {max_sector_exposure:.1%}")
     
     prob = cp.Problem(objective, constraints)
     

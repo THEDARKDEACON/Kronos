@@ -34,9 +34,18 @@ class KronosAlphaGenerator:
             # We fetch from HuggingFace, but you could load local checkpoints if available
             self.tokenizer = KronosTokenizer.from_pretrained(f"NeoQuasar/Kronos-Tokenizer-base")
             self.model = Kronos.from_pretrained(f"NeoQuasar/Kronos-{model_size}")
-            self.predictor = KronosPredictor(self.model, self.tokenizer, max_context=self.max_context)
-            # Send to device
+            
+            # Send to device BEFORE creating predictor
             self.model = self.model.to(self.device)
+            self.model.eval()  # Set to evaluation mode for inference
+            
+            # Enable torch.compile for 2x speedup on CUDA (PyTorch 2.0+)
+            if self.device.startswith('cuda') and hasattr(torch, 'compile'):
+                print("Enabling torch.compile() for optimized inference...")
+                self.model = torch.compile(self.model, mode='reduce-overhead')
+            
+            # Create predictor after model is on device
+            self.predictor = KronosPredictor(self.model, self.tokenizer, max_context=self.max_context, device=self.device)
 
     def generate_signals(self, ohlcv_data: Dict[str, pd.DataFrame], lookback: int = 400, pred_len: int = 10) -> pd.DataFrame:
         """
