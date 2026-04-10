@@ -51,9 +51,11 @@ def main():
     print(portfolio)
     print("="*50)
     
-    total_capital = portfolio['Weight'].sum()
-    print(f"Total Allocated Capital: {total_capital:.2%}")
-    print(f"Cash Drag: {1.0 - total_capital:.2%}")
+    gross_exposure = portfolio['Weight'].abs().sum()
+    net_exposure = portfolio['Weight'].sum()
+    print(f"Gross Exposure (Allocated Capital): {gross_exposure:.2%}")
+    print(f"Net Exposure (Market Neutrality): {net_exposure:.2%}")
+    print(f"Cash Drag: {1.0 - gross_exposure:.2%}")
 
 if __name__ == "__main__":
     main()

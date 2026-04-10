@@ -25,7 +25,7 @@ def construct_portfolio(
             df = ohlcv_dict[t].set_index('timestamps')
             price_series[t] = df['close']
             
-    price_matrix = pd.DataFrame(price_series).fillna(method='ffill').dropna()
+    price_matrix = pd.DataFrame(price_series).ffill().dropna()
     
     if price_matrix.empty:
         return pd.DataFrame()
@@ -94,7 +94,10 @@ def construct_portfolio(
         raw_weights = np.zeros(n)
     else:
         raw_weights = w.value
+    
+    # Debug: Check constraint satisfaction
     current_gross = np.sum(np.abs(raw_weights))
+    print(f"   [DEBUG] CVXPY gross exposure: {current_gross:.4f} (target: {max_gross_exposure:.4f})")
     if current_gross > 0.0001:
         # Scale the weights proportionately to perfectly match our Gross Target
         normalization_factor = max_gross_exposure / current_gross
@@ -105,10 +108,16 @@ def construct_portfolio(
         final_weights_array = raw_weights
         
     final_weights = {}
+    filtered_count = 0
     for i, t in enumerate(valid_tickers):
-        w = final_weights_array[i]
-        if abs(w) > 0.001: 
-            final_weights[t] = w
+        weight_val = final_weights_array[i]
+        if abs(weight_val) > 0.001: 
+            final_weights[t] = weight_val
+            filtered_count += 1
+    
+    # Debug: Check what happened to the weights
+    final_gross = sum(abs(w) for w in final_weights.values())
+    print(f"   [DEBUG] Positions after 0.001 filter: {filtered_count}/{n}, gross exposure: {final_gross:.4f}")
             
     port_df = pd.DataFrame([
         {
