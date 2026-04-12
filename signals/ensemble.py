@@ -344,7 +344,7 @@ def create_ensemble_signals(kronos_df: pd.DataFrame,
     
     macro_tilts = None
     if macro_regime:
-        from signal.macro_regime import MacroRegimeDetector
+        from signals.macro_regime import MacroRegimeDetector
         detector = MacroRegimeDetector()
         macro_tilts = detector.get_regime_factor_tilts(macro_regime)
     

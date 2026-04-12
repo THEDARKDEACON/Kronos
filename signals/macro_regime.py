@@ -66,10 +66,10 @@ class MacroRegimeDetector:
             # VIX - Volatility index
             vix_data = yf.download('^VIX', start=start_date, end=end_date, progress=False)
             if not vix_data.empty:
-                indicators['vix_current'] = float(vix_data['Close'].iloc[-1])
-                indicators['vix_ma20'] = float(vix_data['Close'].tail(20).mean())
+                indicators['vix_current'] = float(vix_data['Close'].iloc[-1].iloc[0])
+                indicators['vix_ma20'] = float(vix_data['Close'].tail(20).mean().iloc[0])
                 indicators['vix_percentile'] = float(
-                    (vix_data['Close'] < indicators['vix_current']).mean()
+                    (vix_data['Close'] < indicators['vix_current']).mean().iloc[0]
                 )
             else:
                 indicators['vix_current'] = 20.0
@@ -98,8 +98,8 @@ class MacroRegimeDetector:
             # DXY - Dollar strength
             dxy_data = yf.download('DX-Y.NYB', start=start_date, end=end_date, progress=False)
             if not dxy_data.empty:
-                indicators['dxy_current'] = float(dxy_data['Close'].iloc[-1])
-                indicators['dxy_ma20'] = float(dxy_data['Close'].tail(20).mean())
+                indicators['dxy_current'] = float(dxy_data['Close'].iloc[-1].iloc[0])
+                indicators['dxy_ma20'] = float(dxy_data['Close'].tail(20).mean().iloc[0])
             else:
                 indicators['dxy_current'] = 100.0
                 indicators['dxy_ma20'] = 100.0
@@ -120,7 +120,7 @@ class MacroRegimeDetector:
             gold_data = yf.download('GC=F', start=start_date, end=end_date, progress=False)
             if not gold_data.empty:
                 indicators['gold_change_30d'] = float(
-                    (gold_data['Close'].iloc[-1] / gold_data['Close'].iloc[-30] - 1)
+                    (gold_data['Close'].iloc[-1].iloc[0] / gold_data['Close'].iloc[-30].iloc[0] - 1)
                     if len(gold_data) >= 30 else 0.0
                 )
             else:

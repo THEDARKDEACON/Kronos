@@ -5,9 +5,9 @@ from data.ingestion import get_universe, get_fundamentals, get_historical_ohlcv
 from strategy.fundamental import get_safe_universe
 from strategy.kronos_alpha import KronosAlphaGenerator
 try:
-    from signal.finbert_sentiment import NewsSentimentFetcher
-    from signal.macro_regime import MacroRegimeDetector, get_current_macro_regime
-    from signal.ensemble import AdaptiveEnsemble, get_top_ensemble_picks
+    from signals.finbert_sentiment import NewsSentimentFetcher
+    from signals.macro_regime import MacroRegimeDetector, get_current_macro_regime
+    from signals.ensemble import AdaptiveEnsemble, get_top_ensemble_picks
     from risk.regime_detector import UnifiedRegimeDetector
     ENSEMBLE_AVAILABLE = True
 except ImportError:

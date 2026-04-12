@@ -6,13 +6,17 @@ Uses FinBERT model fine-tuned on financial text.
 
 import pandas as pd
 import numpy as np
-from typing import Dict, List, Optional, Tuple
-from datetime import datetime, timedelta
+from typing import List, Dict, Optional, Union, Tuple
+from dataclasses import dataclass
+import numpy as np
+import time
+from urllib.parse import quote
 import requests
 import re
 import json
 import os
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 
 
 @dataclass
@@ -32,7 +36,7 @@ class FinBERTSentimentAnalyzer:
     FinBERT-based sentiment analyzer for financial text.
     """
     
-    def __init__(self, model_name: str = "yiyanghkust/finbert-tone", device: str = None):
+    def __init__(self, model_name: str = "ProsusAI/finbert", device: str = None):
         self.model_name = model_name
         self.device = device or ("cuda:0" if self._check_cuda() else "cpu")
         self.model = None
@@ -47,15 +51,39 @@ class FinBERTSentimentAnalyzer:
             return False
     
     def _load_model(self):
-        """Lazy-load FinBERT model."""
+        """Lazy-load FinBERT model with numpy 2.x compatibility. Try ONNX first."""
+        # Try ONNX first (numpy 2.x compatible, no pickle issues)
+        if self._try_load_onnx():
+            return
+        
+        # Fall back to PyTorch/Transformers
         try:
             from transformers import AutoTokenizer, AutoModelForSequenceClassification, pipeline
+            import os
             
             print(f"[FinBERT] Loading {self.model_name}...")
-            self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-            self.model = AutoModelForSequenceClassification.from_pretrained(self.model_name)
             
-            if self.device.startswith('cuda'):
+            # Force safetensors format to avoid numpy pickle issues
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                self.model_name,
+                use_safetensors=True
+            )
+            
+            try:
+                self.model = AutoModelForSequenceClassification.from_pretrained(
+                    self.model_name,
+                    use_safetensors=True,
+                    torch_dtype='auto'
+                )
+            except Exception as e:
+                # Fallback: try without safetensors if not available
+                print(f"[FinBERT] Safetensors failed, trying pickle format...")
+                self.model = AutoModelForSequenceClassification.from_pretrained(
+                    self.model_name,
+                    use_safetensors=False
+                )
+            
+            if self.device.startswith('cuda') and self.model is not None:
                 self.model = self.model.to(self.device)
             
             # Create sentiment pipeline
@@ -63,16 +91,58 @@ class FinBERTSentimentAnalyzer:
                 "sentiment-analysis",
                 model=self.model,
                 tokenizer=self.tokenizer,
-                device=0 if self.device.startswith('cuda') else -1
+                device=0 if self.device.startswith('cuda') else -1,
+                batch_size=16
             )
             print(f"[FinBERT] Model loaded successfully")
+            self._use_onnx = False
             
         except ImportError:
             print("[FinBERT] Warning: transformers not installed. Using mock sentiment.")
             self.pipeline = None
+            self._use_onnx = False
         except Exception as e:
             print(f"[FinBERT] Error loading model: {e}")
+            print("[FinBERT] Falling back to neutral sentiment (0.0)")
             self.pipeline = None
+            self._use_onnx = False
+    
+    def _try_load_onnx(self) -> bool:
+        """Try to load ONNX model. Returns True if successful."""
+        try:
+            import onnxruntime as ort
+            from transformers import AutoTokenizer
+            from pathlib import Path
+            
+            # Check for ONNX model in models/onnx directory
+            model_short = self.model_name.split("/")[-1] if "/" in self.model_name else self.model_name
+            onnx_path = Path(f"./models/onnx/{model_short}_quantized.onnx")
+            tokenizer_path = Path(f"./models/onnx/{model_short}_tokenizer")
+            
+            if not onnx_path.exists():
+                # Try non-quantized version
+                onnx_path = Path(f"./models/onnx/{model_short}.onnx")
+            
+            if not onnx_path.exists() or not tokenizer_path.exists():
+                return False
+            
+            print(f"[FinBERT] Loading ONNX model: {onnx_path}")
+            
+            # Create inference session
+            providers = ['CUDAExecutionProvider', 'CPUExecutionProvider'] if self.device.startswith('cuda') else ['CPUExecutionProvider']
+            self._onnx_session = ort.InferenceSession(str(onnx_path), providers=providers)
+            self.tokenizer = AutoTokenizer.from_pretrained(str(tokenizer_path))
+            
+            print(f"[FinBERT] ONNX model loaded successfully (providers: {self._onnx_session.get_providers()})")
+            self._use_onnx = True
+            return True
+            
+        except ImportError:
+            # onnxruntime not installed
+            return False
+        except Exception as e:
+            print(f"[FinBERT] ONNX load failed: {e}")
+            return False
     
     def analyze_text(self, text: str) -> Tuple[float, float]:
         """
@@ -81,7 +151,14 @@ class FinBERTSentimentAnalyzer:
         Returns:
             (sentiment_score, confidence) where sentiment is -1 to +1
         """
-        if self.pipeline is None or not text:
+        if not text:
+            return 0.0, 0.0
+        
+        # Use ONNX if available
+        if hasattr(self, '_use_onnx') and self._use_onnx and hasattr(self, '_onnx_session'):
+            return self._analyze_text_onnx(text)
+        
+        if self.pipeline is None:
             return 0.0, 0.0
         
         try:
@@ -106,8 +183,54 @@ class FinBERTSentimentAnalyzer:
             print(f"[FinBERT] Analysis error: {e}")
             return 0.0, 0.0
     
+    def _analyze_text_onnx(self, text: str) -> Tuple[float, float]:
+        """Analyze sentiment using ONNX runtime."""
+        try:
+            import numpy as np
+            
+            # Truncate long texts
+            text = text[:512] if len(text) > 512 else text
+            
+            # Tokenize
+            inputs = self.tokenizer(text, return_tensors="np", max_length=512, padding="max_length", truncation=True)
+            
+            # Run inference
+            ort_inputs = {
+                "input_ids": inputs["input_ids"],
+                "attention_mask": inputs["attention_mask"]
+            }
+            
+            ort_outputs = self._onnx_session.run(None, ort_inputs)
+            logits = ort_outputs[0]
+            
+            # Get prediction
+            probs = np.exp(logits) / np.sum(np.exp(logits), axis=-1, keepdims=True)
+            pred_idx = np.argmax(probs, axis=-1)[0]
+            confidence = float(np.max(probs))
+            
+            # Map to sentiment
+            labels = ["negative", "neutral", "positive"]
+            label = labels[pred_idx]
+            
+            if label == "positive":
+                sentiment = confidence
+            elif label == "negative":
+                sentiment = -confidence
+            else:
+                sentiment = 0.0
+            
+            return sentiment, confidence
+            
+        except Exception as e:
+            print(f"[FinBERT] ONNX analysis error: {e}")
+            return 0.0, 0.0
+    
     def analyze_batch(self, texts: List[str]) -> List[Tuple[float, float]]:
         """Analyze sentiment for multiple texts."""
+        # Use ONNX if available
+        if hasattr(self, '_use_onnx') and self._use_onnx and hasattr(self, '_onnx_session'):
+            return [self._analyze_text_onnx(t) for t in texts]
+        
         if self.pipeline is None:
             return [(0.0, 0.0)] * len(texts)
         
@@ -140,60 +263,106 @@ class FinBERTSentimentAnalyzer:
 
 class NewsSentimentFetcher:
     """
-    Fetches and analyzes news sentiment for tickers.
+    Fetches and analyzes news sentiment for tickers using NewsAPI.
+    Includes rate limiting and caching for production use.
     """
     
     def __init__(self, api_key: Optional[str] = None, analyzer: Optional[FinBERTSentimentAnalyzer] = None):
-        self.api_key = api_key or os.getenv('NEWS_API_KEY')
+        self.api_key = api_key or os.getenv('NEWS_API_KEY') or os.getenv('NEWSAPI_KEY')
         self.analyzer = analyzer or FinBERTSentimentAnalyzer()
         self.cache: Dict[str, pd.DataFrame] = {}
+        self._last_request_time = 0
+        self._min_request_interval = 1.2  # NewsAPI free tier: 100 requests/day = ~1 per 14min
+        # For paid tier: reduce to 0.1 (10 req/sec)
         
     def fetch_news_headlines(self, ticker: str, days: int = 7) -> List[Dict]:
         """
-        Fetch news headlines for a ticker.
+        Fetch news headlines for a ticker using NewsAPI.
         
-        Note: This is a placeholder. In production, integrate with:
-        - NewsAPI (newsapi.org)
-        - Bloomberg API
-        - Refinitiv
-        - Alpaca News API
-        """
-        if not self.api_key:
-            # Return mock data for demonstration
-            return self._mock_news(ticker, days)
+        Falls back to mock data if no API key or API error.
         
-        # Example NewsAPI integration
-        try:
-            url = "https://newsapi.org/v2/everything"
-            params = {
-                'q': ticker,
-                'from': (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d'),
-                'to': datetime.now().strftime('%Y-%m-%d'),
-                'language': 'en',
-                'sortBy': 'relevancy',
-                'apiKey': self.api_key
-            }
+        Args:
+            ticker: Stock ticker symbol
+            days: Number of days to look back
             
+        Returns:
+            List of news articles with headline, source, date
+        """
+        # Try real API first
+        if self.api_key:
+            try:
+                return self._fetch_from_newsapi(ticker, days)
+            except Exception as e:
+                print(f"[NewsAPI] Error fetching for {ticker}: {e}. Using mock data.")
+        
+        # Fallback to mock data
+        return self._mock_news(ticker, days)
+    
+    def _fetch_from_newsapi(self, ticker: str, days: int) -> List[Dict]:
+        """
+        Fetch news from NewsAPI with rate limiting.
+        
+        NewsAPI Free Tier: 100 requests/day
+        NewsAPI Paid Tier: 10 requests/second
+        """
+        # Rate limiting
+        elapsed = time.time() - self._last_request_time
+        if elapsed < self._min_request_interval:
+            sleep_time = self._min_request_interval - elapsed
+            print(f"[NewsAPI] Rate limiting: sleeping {sleep_time:.1f}s")
+            time.sleep(sleep_time)
+        
+        # Build query - search for ticker symbol and company name
+        query = f"{ticker} stock OR {ticker} earnings OR {ticker} finance"
+        
+        url = "https://newsapi.org/v2/everything"
+        params = {
+            'q': query,
+            'from': (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d'),
+            'to': datetime.now().strftime('%Y-%m-%d'),
+            'language': 'en',
+            'sortBy': 'relevancy',
+            'pageSize': 20,  # Max 100 for paid, 20 for free
+            'apiKey': self.api_key
+        }
+        
+        try:
             response = requests.get(url, params=params, timeout=30)
+            self._last_request_time = time.time()
+            
+            if response.status_code == 429:
+                print("[NewsAPI] Rate limit exceeded. Using mock data.")
+                return self._mock_news(ticker, days)
+            
+            response.raise_for_status()
             data = response.json()
             
             if data.get('status') == 'ok':
+                articles = data.get('articles', [])
+                print(f"[NewsAPI] Fetched {len(articles)} articles for {ticker}")
+                
                 return [
                     {
                         'title': article['title'],
                         'description': article.get('description', ''),
                         'published_at': article['publishedAt'],
-                        'source': article['source']['name']
+                        'source': article['source']['name'],
+                        'url': article.get('url', '')
                     }
-                    for article in data.get('articles', [])
+                    for article in articles
+                    if article.get('title')  # Filter out empty titles
                 ]
             else:
-                print(f"[News] API error: {data.get('message')}")
-                return []
+                error_msg = data.get('message', 'Unknown error')
+                print(f"[NewsAPI] API error: {error_msg}")
+                return self._mock_news(ticker, days)
                 
+        except requests.exceptions.RequestException as e:
+            print(f"[NewsAPI] Request failed: {e}")
+            return self._mock_news(ticker, days)
         except Exception as e:
-            print(f"[News] Fetch error: {e}")
-            return []
+            print(f"[NewsAPI] Unexpected error: {e}")
+            return self._mock_news(ticker, days)
     
     def _mock_news(self, ticker: str, days: int) -> List[Dict]:
         """Generate mock news for testing."""
