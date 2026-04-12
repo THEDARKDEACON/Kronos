@@ -260,9 +260,23 @@ The simulator tracks portfolio turnover between rebalancing periods and deducts 
 | Component | Location | Purpose |
 |-----------|----------|---------|
 | **Alpha Generator** | `strategy/kronos_alpha.py` | Kronos model inference + signal generation |
-| **Portfolio Optimizer** | `optim/portfolio.py` | CVXPY mean-variance optimization with long/short constraints |
+| **Portfolio Optimizer** | `optim/portfolio.py` | CVXPY mean-variance + Kelly criterion optimization |
 | **Backtest Simulator** | `simulator/backtest.py` | Point-in-time simulation with slippage modeling |
+| **TCA-Aware Backtest** | `simulator/backtest_tca.py` | Transaction cost analysis + market impact |
 | **Data Ingestion** | `data/ingestion.py` | yFinance integration with Parquet caching |
+| **Corporate Actions** | `data/corporate_actions.py` | Split/dividend adjustments, survivorship bias |
+| **PIT Fundamentals** | `data/pit_database.py` | Point-in-time fundamentals (look-ahead bias prevention) |
+| **Intraday Data** | `data/intraday_fetcher.py` | Hourly/30-min data for intraday signals |
+| **FinBERT Sentiment** | `signal/finbert_sentiment.py` | News sentiment analysis |
+| **Macro Regime** | `signal/macro_regime.py` | VIX/yield curve regime detection |
+| **Signal Ensemble** | `signal/ensemble.py` | Adaptive IC-based signal combination |
+| **Factor Risk Model** | `risk/factor_model.py` | Barra-style multi-factor risk decomposition |
+| **Regime Detection** | `risk/regime_detector.py` | Volatility/correlation regime monitoring |
+| **Stress Testing** | `risk/stress_testing.py` | Historical scenario analysis |
+| **Live Trading** | `execution/broker_connector.py` | Alpaca/IBKR integration, VWAP execution |
+| **Market Impact** | `execution/market_impact.py` | Almgren-Chriss impact model |
+| **Alpha Monitor** | `research/alpha_monitor.py` | IC tracking, alpha decay detection |
+| **Experiment Tracker** | `research/experiment_tracker.py` | MLflow integration, hyperparameter logging |
 
 
 ## 🔧 Finetuning on Your Own Data (A-Share Market Example)

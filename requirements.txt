@@ -14,3 +14,19 @@ cvxpy>=1.3.0
 aiohttp>=3.8.0
 onnx>=1.14.0
 onnxruntime-gpu>=1.16.0
+
+# Broker APIs (optional - for live trading)
+alpaca-trade-api>=3.0.0
+ib-insync>=0.9.70
+
+# NLP and ML for ensemble signals
+transformers>=4.30.0
+torch>=2.0.0
+accelerate>=0.20.0
+
+# Experiment tracking and MLOps
+mlflow>=2.8.0
+requests>=2.31.0
+
+# Data science utilities
+scikit-learn>=1.3.0

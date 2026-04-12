@@ -58,6 +58,7 @@ Desktop.ini
 # Logs
 *.log
 logs/
+*.out
 
 # Environment
 .env
@@ -74,3 +75,25 @@ venv.bak/
 temp/
 tmp/
 .python-version
+
+# Kronos specific - Data cache
+cache/
+data/cache/
+data/pit_cache/
+
+# Experiment tracking
+experiments/
+mlruns/
+mlartifacts/
+
+# ONNX models
+*.onnx
+onnx_models/
+
+# API keys and secrets
+*.key
+*.pem
+secrets.json
+
+# windsurf plans (dev only)
+.windsurf/

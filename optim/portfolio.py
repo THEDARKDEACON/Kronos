@@ -14,7 +14,9 @@ def construct_portfolio(
     max_sector_exposure: float = 0.20,  # Max 20% gross exposure per sector
     liquidity_scaling: bool = True,  # Enable liquidity-based position sizing
     min_avg_volume: float = 1000000,  # Minimum 1M shares avg daily volume
-    max_position_by_volume: float = 0.02  # Max 2% of average daily volume
+    max_position_by_volume: float = 0.02,  # Max 2% of average daily volume
+    use_kelly_criterion: bool = False,  # Use Kelly criterion instead of mean-variance
+    kelly_fraction: float = 0.25  # Fractional Kelly (quarter-Kelly recommended)
 ) -> pd.DataFrame:
     """
     Constructs a SOTA Market-Neutral Market Portfolio using Long/Short Optimization.
@@ -104,22 +106,54 @@ def construct_portfolio(
     n = len(valid_tickers)
     w = cp.Variable(n)
     
-    # Objective: Maximize return - risk_aversion * variance - l2_penalty * ||w||^2 - transaction_costs
-    port_return = mu @ w
-    port_variance = cp.quad_form(w, cov_matrix.values)
-    l2_reg = l2_penalty * cp.sum_squares(w)
-    
-    # Turnover penalty: penalize deviation from previous weights (5 bps per side)
-    if prev_weights is not None:
-        prev_w_array = np.array([prev_weights.get(t, 0.0) for t in valid_tickers])
-        turnover = cp.sum(cp.abs(w - prev_w_array))
-        turnover_penalty = transaction_cost * turnover
-        print(f"   [Optimizer] Including turnover penalty: {transaction_cost:.4f} per side")
+    if use_kelly_criterion:
+        # === KELLY CRITERION OBJECTIVE ===
+        # Kelly maximizes: w'μ - 0.5 * w'Σw (log-utility approximation)
+        # This is equivalent to mean-variance with risk_aversion = 1.0
+        print(f"   [Optimizer] Using Kelly Criterion (fractional: {kelly_fraction}x)")
+        
+        port_return = mu @ w
+        port_variance = cp.quad_form(w, cov_matrix.values)
+        
+        # Kelly objective: maximize expected log wealth
+        # Approximation: μ'w - 0.5 * w'Σw
+        kelly_objective = port_return - 0.5 * port_variance
+        
+        # Apply fractional Kelly for safety
+        if kelly_fraction != 1.0:
+            # Scale down the Kelly-optimal weights via regularization
+            kelly_reg = (1.0 - kelly_fraction) * cp.sum_squares(w)
+        else:
+            kelly_reg = 0
+        
+        # Turnover penalty
+        if prev_weights is not None:
+            prev_w_array = np.array([prev_weights.get(t, 0.0) for t in valid_tickers])
+            turnover = cp.sum(cp.abs(w - prev_w_array))
+            turnover_penalty = transaction_cost * turnover
+        else:
+            turnover_penalty = 0
+        
+        objective = cp.Maximize(kelly_objective - kelly_reg - turnover_penalty)
+        
     else:
-        turnover_penalty = 0
-        print(f"   [Optimizer] No previous weights, skipping turnover penalty")
-    
-    objective = cp.Maximize(port_return - risk_aversion * port_variance - l2_reg - turnover_penalty)
+        # === MEAN-VARIANCE OBJECTIVE (Default) ===
+        # Objective: Maximize return - risk_aversion * variance - l2_penalty * ||w||^2 - transaction_costs
+        port_return = mu @ w
+        port_variance = cp.quad_form(w, cov_matrix.values)
+        l2_reg = l2_penalty * cp.sum_squares(w)
+        
+        # Turnover penalty: penalize deviation from previous weights (5 bps per side)
+        if prev_weights is not None:
+            prev_w_array = np.array([prev_weights.get(t, 0.0) for t in valid_tickers])
+            turnover = cp.sum(cp.abs(w - prev_w_array))
+            turnover_penalty = transaction_cost * turnover
+            print(f"   [Optimizer] Including turnover penalty: {transaction_cost:.4f} per side")
+        else:
+            turnover_penalty = 0
+            print(f"   [Optimizer] No previous weights, skipping turnover penalty")
+        
+        objective = cp.Maximize(port_return - risk_aversion * port_variance - l2_reg - turnover_penalty)
     
     # Constraints:
     # 1. Market neutral: sum(weights) = 0
