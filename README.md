@@ -261,7 +261,7 @@ The simulator tracks portfolio turnover between rebalancing periods and deducts 
 |-----------|----------|---------|
 | **Alpha Generator** | `strategy/kronos_alpha.py` | Kronos model inference + signal generation |
 | **Portfolio Optimizer** | `optim/portfolio.py` | CVXPY mean-variance + Kelly criterion optimization |
-| **Backtest Simulator** | `simulator/backtest.py` | Point-in-time simulation with slippage modeling |
+| **Backtest Simulator** | `simulator/backtest.py` | Walk-forward simulation computing realized P&L, Sharpe, and Calmar |
 | **TCA-Aware Backtest** | `simulator/backtest_tca.py` | Transaction cost analysis + market impact |
 | **Data Ingestion** | `data/ingestion.py` | yFinance integration with Parquet caching |
 | **Corporate Actions** | `data/corporate_actions.py` | Split/dividend adjustments, survivorship bias |
@@ -276,6 +276,9 @@ The simulator tracks portfolio turnover between rebalancing periods and deducts 
 | **Live Trading** | `execution/broker_connector.py` | Alpaca/IBKR integration, VWAP execution |
 | **Market Impact** | `execution/market_impact.py` | Almgren-Chriss impact model |
 | **Alpha Monitor** | `research/alpha_monitor.py` | IC tracking, alpha decay detection |
+| **IC Tracker** | `research/ic_tracker.py` | Information Coefficient (IC) persistence and 5-day horizon settlement |
+| **Live Dashboard** | `dashboard/app.py` | Streamlit monitoring for portfolio, signals, risk, and real execution |
+| **Production Runner** | `scripts/run_production.py` | End-to-end automated live pipeline execution |
 | **Experiment Tracker** | `research/experiment_tracker.py` | MLflow integration, hyperparameter logging |
 
 

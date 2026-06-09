@@ -278,8 +278,9 @@ class NewsSentimentFetcher:
     def fetch_news_headlines(self, ticker: str, days: int = 7) -> List[Dict]:
         """
         Fetch news headlines for a ticker using NewsAPI.
-        
-        Falls back to mock data if no API key or API error.
+
+        Returns an empty list when no API key is configured or on API errors
+        (sentiment falls back to neutral 0.0).
         
         Args:
             ticker: Stock ticker symbol
@@ -288,15 +289,14 @@ class NewsSentimentFetcher:
         Returns:
             List of news articles with headline, source, date
         """
-        # Try real API first
-        if self.api_key:
-            try:
-                return self._fetch_from_newsapi(ticker, days)
-            except Exception as e:
-                print(f"[NewsAPI] Error fetching for {ticker}: {e}. Using mock data.")
-        
-        # Fallback to mock data
-        return self._mock_news(ticker, days)
+        if not self.api_key:
+            return []
+
+        try:
+            return self._fetch_from_newsapi(ticker, days)
+        except Exception as e:
+            print(f"[NewsAPI] Error fetching for {ticker}: {e}")
+            return []
     
     def _fetch_from_newsapi(self, ticker: str, days: int) -> List[Dict]:
         """
@@ -331,8 +331,8 @@ class NewsSentimentFetcher:
             self._last_request_time = time.time()
             
             if response.status_code == 429:
-                print("[NewsAPI] Rate limit exceeded. Using mock data.")
-                return self._mock_news(ticker, days)
+                print("[NewsAPI] Rate limit exceeded.")
+                return []
             
             response.raise_for_status()
             data = response.json()
@@ -355,42 +355,14 @@ class NewsSentimentFetcher:
             else:
                 error_msg = data.get('message', 'Unknown error')
                 print(f"[NewsAPI] API error: {error_msg}")
-                return self._mock_news(ticker, days)
+                return []
                 
         except requests.exceptions.RequestException as e:
             print(f"[NewsAPI] Request failed: {e}")
-            return self._mock_news(ticker, days)
+            return []
         except Exception as e:
             print(f"[NewsAPI] Unexpected error: {e}")
-            return self._mock_news(ticker, days)
-    
-    def _mock_news(self, ticker: str, days: int) -> List[Dict]:
-        """Generate mock news for testing."""
-        import random
-        
-        templates = [
-            (f"{ticker} beats earnings expectations", 0.8),
-            (f"{ticker} misses revenue target", -0.6),
-            (f"Analyst upgrades {ticker} to buy", 0.7),
-            (f"{ticker} announces stock buyback program", 0.5),
-            (f"{ticker} faces regulatory scrutiny", -0.7),
-            (f"{ticker} expands into new markets", 0.4),
-            (f"{ticker} CEO steps down", -0.5),
-            (f"{ticker} partners with tech giant", 0.6),
-        ]
-        
-        news = []
-        for i in range(min(5, days)):
-            template, bias = random.choice(templates)
-            date = datetime.now() - timedelta(days=i)
-            news.append({
-                'title': template,
-                'description': f"Details about {ticker}...",
-                'published_at': date.isoformat(),
-                'source': 'Mock Financial News'
-            })
-        
-        return news
+            return []
     
     def get_ticker_sentiment(self, ticker: str, lookback_days: int = 7) -> SentimentSignal:
         """

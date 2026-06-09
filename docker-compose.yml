@@ -1,30 +1,23 @@
 version: '3.8'
 
 services:
-  # Kronos Pipeline Runner
-  kronos-pipeline:
+  kronos:
     build: .
-    container_name: kronos-pipeline
+    container_name: kronos
     restart: unless-stopped
     environment:
       - PYTHONUNBUFFERED=1
-      - KRONOS_MODE=${KRONOS_MODE:-production}
+      - KRONOS_MODE=${KRONOS_MODE:-dry}
     env_file:
       - .env
     volumes:
       - ./data:/app/data
-      - ./experiments:/app/experiments
+      - ./cache:/app/cache
       - ./logs:/app/logs
-      - ./models:/app/models
-    depends_on:
-      - redis
-      - mlflow
-    networks:
-      - kronos-network
-    command: python main.py --mode production
+    command: python3 scripts/run_production.py
 
-  # Dashboard (Streamlit)
-  kronos-dashboard:
+  dashboard:
+    profiles: [full]
     build: .
     container_name: kronos-dashboard
     restart: unless-stopped
@@ -33,75 +26,15 @@ services:
     environment:
       - STREAMLIT_SERVER_HEADLESS=true
       - STREAMLIT_SERVER_PORT=8501
-      - STREAMLIT_SERVER_ENABLECORS=false
     env_file:
       - .env
     volumes:
       - ./data:/app/data
       - ./experiments:/app/experiments
-    depends_on:
-      - redis
-    networks:
-      - kronos-network
-    command: streamlit run dashboard/app.py
+    command: streamlit run dashboard/app.py --server.port=8501 --server.address=0.0.0.0
 
-  # Scheduler (Cron alternative)
-  kronos-scheduler:
-    build: .
-    container_name: kronos-scheduler
-    restart: unless-stopped
-    environment:
-      - PYTHONUNBUFFERED=1
-    env_file:
-      - .env
-    volumes:
-      - ./data:/app/data
-      - ./experiments:/app/experiments
-      - ./logs:/app/logs
-    depends_on:
-      - redis
-      - kronos-pipeline
-    networks:
-      - kronos-network
-    command: python scripts/scheduler.py
-
-  # Redis for caching and message queue
-  redis:
-    image: redis:7-alpine
-    container_name: kronos-redis
-    restart: unless-stopped
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis-data:/data
-    networks:
-      - kronos-network
-
-  # MLflow for experiment tracking
-  mlflow:
-    image: python:3.10-slim
-    container_name: kronos-mlflow
-    restart: unless-stopped
-    ports:
-      - "5000:5000"
-    environment:
-      - MLFLOW_BACKEND_STORE_URI=sqlite:///mlflow.db
-      - MLFLOW_DEFAULT_ARTIFACT_ROOT=./mlruns
-    volumes:
-      - ./mlruns:/mlruns
-      - ./mlflow.db:/mlflow.db
-    networks:
-      - kronos-network
-    command: >
-      bash -c "pip install mlflow &&
-               mlflow server 
-               --backend-store-uri sqlite:///mlflow.db 
-               --default-artifact-root ./mlruns 
-               --host 0.0.0.0 
-               --port 5000"
-
-  # Prometheus for metrics
   prometheus:
+    profiles: [monitoring]
     image: prom/prometheus:latest
     container_name: kronos-prometheus
     restart: unless-stopped
@@ -110,33 +43,22 @@ services:
     volumes:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
       - prometheus-data:/prometheus
-    networks:
-      - kronos-network
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.path=/prometheus'
 
-  # Grafana for dashboards
   grafana:
+    profiles: [monitoring]
     image: grafana/grafana:latest
     container_name: kronos-grafana
     restart: unless-stopped
     ports:
       - "3000:3000"
     environment:
-      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-changeme}
     volumes:
       - grafana-data:/var/lib/grafana
-      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
-      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources
-    networks:
-      - kronos-network
 
 volumes:
-  redis-data:
   prometheus-data:
   grafana-data:
-
-networks:
-  kronos-network:
-    driver: bridge

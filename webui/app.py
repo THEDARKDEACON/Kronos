@@ -698,11 +698,12 @@ def get_model_status():
         })
 
 if __name__ == '__main__':
+    debug = os.getenv('FLASK_DEBUG', '0') == '1'
     print("Starting Kronos Web UI...")
     print(f"Model availability: {MODEL_AVAILABLE}")
     if MODEL_AVAILABLE:
         print("Tip: You can load Kronos model through /api/load-model endpoint")
     else:
         print("Tip: Will use simulated data for demonstration")
-    
-    app.run(debug=True, host='0.0.0.0', port=7070)
+
+    app.run(debug=debug, host='0.0.0.0', port=int(os.getenv('FLASK_PORT', '7070')))

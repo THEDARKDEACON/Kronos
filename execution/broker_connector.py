@@ -360,19 +360,51 @@ class ExecutionEngine:
             position_value = pos.quantity * pos.current_price
             current_weights[symbol] = position_value / total_equity if total_equity > 0 else 0
         
+        # Fetch real last-close prices for all symbols in one batch
+        all_symbols = set(target_weights.keys()) | set(current_weights.keys())
+        live_prices: Dict[str, float] = {}
+
+        # First pass: use prices already in current positions (free, no API call)
+        for symbol, pos in current_positions.items():
+            if pos.current_price and pos.current_price > 0:
+                live_prices[symbol] = pos.current_price
+
+        # Second pass: fetch missing prices from yfinance in one batch call
+        missing = [s for s in all_symbols if s not in live_prices]
+        if missing:
+            try:
+                import yfinance as yf
+                raw = yf.download(
+                    missing, period="2d", progress=False, group_by="ticker",
+                    auto_adjust=True
+                )
+                for sym in missing:
+                    try:
+                        if len(missing) == 1:
+                            price = float(raw["Close"].dropna().iloc[-1])
+                        else:
+                            price = float(raw[sym]["Close"].dropna().iloc[-1])
+                        if price > 0:
+                            live_prices[sym] = price
+                    except Exception:
+                        pass
+            except Exception as e:
+                print(f"[Execution] yfinance price fetch failed: {e}")
+
         # Calculate required trades
         trades = []
-        all_symbols = set(target_weights.keys()) | set(current_weights.keys())
-        
         for symbol in all_symbols:
             target = target_weights.get(symbol, 0)
             current = current_weights.get(symbol, 0)
             delta = target - current
-            
+
             if abs(delta) > 0.001:  # 10 bps minimum trade threshold
                 trade_value = delta * total_equity
-                # Get current price for share calculation
-                current_price = 100.0  # Would fetch real price
+                current_price = live_prices.get(symbol, 100.0)
+                if current_price <= 0:
+                    current_price = 100.0
+                if current_price == 100.0 and symbol not in live_prices:
+                    print(f"   [Execution] WARNING: Using fallback $100 price for {symbol} — fetch failed")
                 shares = int(trade_value / current_price)
                 
                 if shares != 0:
@@ -389,21 +421,31 @@ class ExecutionEngine:
         # Execute trades
         executed = []
         failed = []
+        fills = []
         total_cost = 0.0
         
         for order in trades:
             success, order_id = self.broker.place_order(order)
             if success:
                 executed.append(order)
-                # Calculate estimated transaction cost
-                trade_value = order.quantity * 100  # Estimated price
+                trade_value = order.quantity * 100
                 cost = trade_value * self.transaction_cost
                 total_cost += cost
                 
-                # Wait briefly for fill (in production, use async callbacks)
                 time.sleep(0.1)
                 status = self.broker.get_order_status(order_id)
                 print(f"   [Execution] {order.symbol} {order.side.value}: {status.get('status', 'pending')}")
+                fills.append({
+                    'timestamp': datetime.now().isoformat(),
+                    'symbol': order.symbol,
+                    'side': order.side.value,
+                    'qty': float(order.quantity),
+                    'order_type': order.order_type.value,
+                    'status': status.get('status', 'unknown'),
+                    'filled_avg_price': status.get('filled_avg_price'),
+                    'order_id': order_id,
+                    'slippage_bps': self._estimate_slippage([order]),
+                })
             else:
                 failed.append(order)
         
@@ -414,6 +456,7 @@ class ExecutionEngine:
             'total_trades': len(trades),
             'executed': len(executed),
             'failed': len(failed),
+            'fills': fills,
             'transaction_costs': total_cost,
             'estimated_slippage_bps': self._estimate_slippage(executed),
             'positions_before': len(current_positions),

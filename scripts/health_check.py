@@ -137,8 +137,8 @@ class HealthChecker:
             from strategy.kronos_alpha import KronosAlphaGenerator
             model = KronosAlphaGenerator(model_size='small')
             results['kronos'] = {
-                'healthy': model.model is not None,
-                'model_size': 'small'
+                'healthy': model.predictor is not None,
+                'model_size': 'small',
             }
         except Exception as e:
             results['kronos'] = {'healthy': False, 'error': str(e)}
@@ -162,28 +162,31 @@ class HealthChecker:
     
     def _check_broker(self) -> Dict:
         """Check broker connectivity"""
-        mode = os.getenv('KRONOS_MODE', 'paper')
-        
-        if mode == 'backtest':
-            return {'healthy': True, 'mode': 'backtest', 'note': 'No broker needed'}
-        
+        mode = os.getenv('KRONOS_MODE', 'dry').lower()
+
+        if mode in ('dry', 'backtest'):
+            return {'healthy': True, 'mode': mode, 'note': 'No broker needed'}
+
         try:
-            from execution.alpaca_executor import AlpacaExecutor
-            broker = AlpacaExecutor(paper=(mode == 'paper'))
-            account = broker.get_account()
-            
+            from execution.broker_connector import create_broker
+
+            broker = create_broker('alpaca', paper=(mode == 'paper'))
+            if not broker.connect():
+                return {'healthy': False, 'mode': mode, 'error': 'Broker connection failed'}
+
+            account = broker.get_account_info()
+            broker.disconnect()
             return {
                 'healthy': True,
                 'mode': mode,
-                'account_id': account.get('id', 'unknown'),
                 'buying_power': float(account.get('buying_power', 0)),
-                'cash': float(account.get('cash', 0))
+                'cash': float(account.get('cash', 0)),
             }
         except Exception as e:
             return {
                 'healthy': False,
                 'mode': mode,
-                'error': str(e)
+                'error': str(e),
             }
     
     def _check_database(self) -> Dict:

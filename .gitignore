@@ -97,3 +97,11 @@ secrets.json
 
 # windsurf plans (dev only)
 .windsurf/
+
+# Pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Streamlit / Web UI
+.streamlit/

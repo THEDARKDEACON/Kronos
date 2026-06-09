@@ -19,196 +19,26 @@ import os
 # Add project root to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# ============================================================================
-# LIVE PIPELINE DATA LOADING FUNCTIONS
-# ============================================================================
+BACKTEST_RESULTS_PATH = Path("experiments/backtest_results.json")
+IC_HISTORY_PATH = Path("research/ic_history.parquet")
 
-@st.cache_data(ttl=30)  # Cache for 30 seconds (live mode)
-def load_portfolio_data():
-    """Load current portfolio positions from pipeline output."""
-    try:
-        cache_dir = Path("./data/cache")
-        if cache_dir.exists():
-            # Look for recent positions files from production pipeline
-            positions_files = list(cache_dir.glob("positions_*.parquet"))
-            if positions_files:
-                latest = max(positions_files, key=lambda p: p.stat().st_mtime)
-                df = pd.read_parquet(latest)
-                df.attrs['timestamp'] = datetime.fromtimestamp(latest.stat().st_mtime)
-                return df
-    except Exception as e:
-        st.warning(f"Could not load portfolio data: {e}")
-    return None
+from dotenv import load_dotenv
+load_dotenv()
 
-@st.cache_data(ttl=30)
-def load_pipeline_snapshot():
-    """Load latest pipeline snapshot with metadata."""
-    try:
-        cache_dir = Path("./data/cache")
-        if cache_dir.exists():
-            snapshot_files = list(cache_dir.glob("snapshot_*.json"))
-            if snapshot_files:
-                latest = max(snapshot_files, key=lambda p: p.stat().st_mtime)
-                with open(latest) as f:
-                    data = json.load(f)
-                data['file_timestamp'] = datetime.fromtimestamp(latest.stat().st_mtime)
-                return data
-    except Exception as e:
-        pass
-    return None
+from dashboard.live_data import (
+    get_data_freshness_indicator,
+    load_backtest_results,
+    load_live_dashboard_state,
+    load_live_news,
+    load_signal_ic_history,
+    load_trade_history,
+)
 
-@st.cache_data(ttl=30)
-def load_latest_signals():
-    """Load latest generated signals from pipeline."""
-    try:
-        cache_dir = Path("./data/cache")
-        if cache_dir.exists():
-            signal_files = list(cache_dir.glob("signals_*.parquet"))
-            if signal_files:
-                latest = max(signal_files, key=lambda p: p.stat().st_mtime)
-                df = pd.read_parquet(latest)
-                df.attrs['timestamp'] = datetime.fromtimestamp(latest.stat().st_mtime)
-                return df
-    except Exception as e:
-        pass
-    return None
-
-@st.cache_data(ttl=60)
-def load_backtest_results():
-    """Load backtest performance metrics."""
-    try:
-        # Check for backtest output files
-        results_file = Path("./experiments/backtest_results.json")
-        if results_file.exists():
-            with open(results_file) as f:
-                return json.load(f)
-    except Exception as e:
-        pass
-    return None
-
-@st.cache_data(ttl=30)
-def load_live_signals_from_model():
-    """Load current signal predictions from Kronos."""
-    try:
-        from strategy.kronos_alpha import KronosAlphaGenerator
-        
-        # Initialize generator (uses cached model)
-        generator = KronosAlphaGenerator(model_size="small")
-        
-        # This would run actual inference - for now return cached if available
-        cache_file = Path("./data/cache/latest_signals.parquet")
-        if cache_file.exists() and cache_file.stat().st_mtime > (datetime.now().timestamp() - 3600):
-            return pd.read_parquet(cache_file)
-    except Exception as e:
-        pass
-    return None
-
-@st.cache_data(ttl=30)
-def load_risk_metrics():
-    """Load current risk metrics."""
-    try:
-        from risk.factor_model import FactorRiskModel
-        from risk.regime_detector import MacroRegimeDetector
-        
-        risk_model = FactorRiskModel()
-        regime_detector = MacroRegimeDetector()
-        
-        return {
-            "risk_model": risk_model,
-            "regime": regime_detector.get_current_regime()
-        }
-    except Exception as e:
-        pass
-    return None
-
-@st.cache_data(ttl=60)
-def load_trade_history():
-    """Load historical trade execution data for quality analysis."""
-    try:
-        # Look for trade execution logs
-        trades_file = Path("./data/cache/trades.parquet")
-        if trades_file.exists():
-            return pd.read_parquet(trades_file)
-    except Exception as e:
-        pass
-    return None
-
-@st.cache_data(ttl=120)  # Cache for 2 minutes
-def load_signal_ic_history():
-    """Load historical IC (Information Coefficient) data for signal quality."""
-    try:
-        # Look for IC tracking files from alpha_monitor
-        ic_file = Path("./research/ic_history.parquet")
-        if ic_file.exists():
-            return pd.read_parquet(ic_file)
-    except Exception as e:
-        pass
-    return None
-
-@st.cache_data(ttl=300)  # Cache for 5 minutes to respect NewsAPI rate limits
-def load_live_news(tickers=None, max_articles=10):
-    """Load live news from NewsAPI with sentiment analysis."""
-    try:
-        from signals.finbert_sentiment import NewsSentimentFetcher
-        
-        fetcher = NewsSentimentFetcher()
-        all_news = []
-        
-        # If tickers specified, fetch news for each
-        if tickers:
-            for ticker in tickers[:5]:  # Limit to avoid rate limits
-                try:
-                    articles = fetcher.fetch_news_headlines(ticker, days=3)
-                    for article in articles[:3]:  # Top 3 per ticker
-                        # Get sentiment
-                        sentiment_result = fetcher.analyzer.analyze_text(article['title'])
-                        sentiment_score = sentiment_result[0] if isinstance(sentiment_result, tuple) else sentiment_result
-                        
-                        all_news.append({
-                            'time': article.get('published_at', 'Recent'),
-                            'headline': article['title'],
-                            'source': article.get('source', 'News'),
-                            'url': article.get('url', ''),
-                            'ticker': ticker,
-                            'sentiment': 'positive' if sentiment_score > 0.2 else 'negative' if sentiment_score < -0.2 else 'neutral',
-                            'score': sentiment_score,
-                            'impact': 'High' if abs(sentiment_score) > 0.5 else 'Medium'
-                        })
-                except Exception as e:
-                    continue
-        else:
-            # Fetch general market news
-            articles = fetcher.fetch_news_headlines("SPY", days=2)
-            for article in articles[:max_articles]:
-                sentiment_result = fetcher.analyzer.analyze_text(article['title'])
-                sentiment_score = sentiment_result[0] if isinstance(sentiment_result, tuple) else sentiment_result
-                
-                all_news.append({
-                    'time': article.get('published_at', 'Recent'),
-                    'headline': article['title'],
-                    'source': article.get('source', 'News'),
-                    'url': article.get('url', ''),
-                    'ticker': 'MARKET',
-                    'sentiment': 'positive' if sentiment_score > 0.2 else 'negative' if sentiment_score < -0.2 else 'neutral',
-                    'score': sentiment_score,
-                    'impact': 'High' if abs(sentiment_score) > 0.5 else 'Medium'
-                })
-        
-        return all_news[:max_articles]
-    except Exception as e:
-        st.warning(f"Could not load live news: {e}")
-        return None
-
-# ============================================================================
-# DATA GENERATION FALLBACKS (when live data unavailable)
-# ============================================================================
-
+# Demo data for non-live modes only
 def generate_sample_portfolio():
-    """Generate sample portfolio for demonstration."""
     tickers = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "JPM", "V", "UNH"]
     weights = np.random.uniform(-5, 15, len(tickers))
-    weights = weights / np.sum(np.abs(weights)) * 100  # Normalize to gross exposure ~100%
-    
+    weights = weights / np.sum(np.abs(weights)) * 100
     return pd.DataFrame({
         "Ticker": tickers,
         "Weight": weights,
@@ -216,53 +46,22 @@ def generate_sample_portfolio():
         "Entry_Price": np.random.uniform(50, 500, len(tickers)),
         "Current_Price": np.random.uniform(50, 500, len(tickers)),
         "PnL_Pct": np.random.uniform(-10, 20, len(tickers)),
-        "Sector": np.random.choice(["Tech", "Finance", "Health", "Consumer"], len(tickers))
+        "Sector": np.random.choice(["Tech", "Finance", "Health", "Consumer"], len(tickers)),
     })
 
 def generate_sample_equity_curve(days=90):
-    """Generate sample equity curve data."""
     dates = pd.date_range(end=datetime.now(), periods=days, freq='D')
     returns = np.random.normal(0.0005, 0.015, days)
     equity = 100 * np.cumprod(1 + returns)
     benchmark = 100 * np.cumprod(1 + np.random.normal(0.0003, 0.012, days))
-    
-    # Calculate drawdown
     peak = np.maximum.accumulate(equity)
     drawdown = (equity - peak) / peak * 100
-    
     return pd.DataFrame({
         "Date": dates,
         "Equity": equity,
         "Benchmark": benchmark,
-        "Drawdown": drawdown
+        "Drawdown": drawdown,
     })
-
-# ============================================================================
-# DATA FRESHNESS HELPERS
-# ============================================================================
-
-def get_data_freshness_indicator(timestamp):
-    """Return visual indicator for data freshness."""
-    if timestamp is None:
-        return "🔴 No data"
-    
-    age_minutes = (datetime.now() - timestamp).total_seconds() / 60
-    
-    if age_minutes < 1:
-        return f"🟢 Live (<1 min ago)"
-    elif age_minutes < 5:
-        return f"🟡 {int(age_minutes)} min ago"
-    elif age_minutes < 30:
-        return f"🟠 {int(age_minutes)} min ago"
-    else:
-        return f"🔴 {int(age_minutes)} min ago - Stale"
-
-def is_data_fresh(timestamp, max_age_minutes=5):
-    """Check if data is fresh enough to display."""
-    if timestamp is None:
-        return False
-    age_minutes = (datetime.now() - timestamp).total_seconds() / 60
-    return age_minutes < max_age_minutes
 
 # ============================================================================
 # MAIN DASHBOARD SETUP
@@ -344,70 +143,78 @@ if auto_refresh and data_mode == "Live Pipeline":
     st_autorefresh(interval=30000, limit=None, key="live_refresh")
     st.sidebar.success("✅ Auto-refresh enabled")
 
-# Data freshness indicator in sidebar
-st.sidebar.markdown("---")
-st.sidebar.header("📡 Data Status")
-
 # Main dashboard
 st.title("📊 Kronos Quant Pipeline Dashboard")
 
 # Load live data based on mode
+live_state = None
 live_portfolio = None
 live_signals = None
 live_snapshot = None
 live_risk = None
+live_broker = None
+live_drift = None
 
 if data_mode == "Live Pipeline":
-    live_portfolio = load_portfolio_data()
-    live_signals = load_latest_signals()
-    live_snapshot = load_pipeline_snapshot()
-    live_risk = load_risk_metrics()
+    live_state = load_live_dashboard_state()
+    live_portfolio = live_state.target_portfolio
+    live_signals = live_state.signals
+    live_snapshot = live_state.snapshot
+    live_risk = live_state.risk
+    live_broker = live_state.broker
+    live_drift = live_state.drift
 
 # Display data freshness in sidebar
-if live_portfolio is not None:
-    st.sidebar.text(get_data_freshness_indicator(live_portfolio.attrs.get('timestamp')))
+st.sidebar.markdown("---")
+st.sidebar.header("📡 Data Status")
+if data_mode == "Live Pipeline" and live_state:
+    for msg in live_state.messages:
+        st.sidebar.caption(msg)
+    if live_portfolio is not None:
+        st.sidebar.text(f"Targets: {get_data_freshness_indicator(live_portfolio.attrs.get('timestamp'))}")
+    if live_broker is not None:
+        st.sidebar.text(f"Broker: {get_data_freshness_indicator(live_broker.timestamp)}")
+    elif live_portfolio is None and live_broker is None:
+        st.sidebar.warning("No live data — run pipeline and/or connect Alpaca")
 else:
-    st.sidebar.text("🔴 Simulated Data")
+    st.sidebar.text("Demo / research mode")
 
 # ============================================================================
 # ALERTS & NOTIFICATIONS
 # ============================================================================
 
-def check_alerts(live_risk, live_signals, live_news):
+def check_alerts(live_risk, live_signals, live_news, live_snapshot=None):
     """Generate alerts based on risk thresholds and anomalies."""
     alerts = []
-    
-    if live_risk:
-        # VaR breach alert
-        var_value = live_risk.get('var_95', -0.0234)
-        if abs(var_value) > 0.05:  # VaR > 5%
-            alerts.append(("🔴", "CRITICAL", f"VaR breach: {var_value:.2%} exceeds 5% limit"))
-        
-        # Drawdown alert
-        max_dd = live_risk.get('max_drawdown', -0.083)
-        if abs(max_dd) > 0.10:  # Drawdown > 10%
-            alerts.append(("🔴", "CRITICAL", f"Max drawdown at {max_dd:.2%} - exceeds 10% threshold"))
-    
+
+    if live_snapshot and live_snapshot.get("should_halt"):
+        alerts.append(("🔴", "CRITICAL", f"Trading halt: {live_snapshot.get('halt_reason', 'unknown')}"))
+
+    if live_risk and live_risk.get("adjustments"):
+        adj = live_risk["adjustments"]
+        vix = adj.get("vix", 0)
+        if vix > 35:
+            alerts.append(("🔴", "CRITICAL", f"Elevated VIX: {vix:.1f}"))
+        exposure = adj.get("exposure_multiplier", 1.0)
+        if exposure < 0.5:
+            alerts.append(("🟡", "WARNING", f"Low recommended exposure: {exposure:.0%}"))
+
     if live_signals is not None and len(live_signals) > 0:
-        # Signal divergence alert
-        kronos_signals = live_signals.get('kronos_signal', pd.Series())
-        sentiment_signals = live_signals.get('sentiment_signal', pd.Series())
-        if len(kronos_signals) > 0 and len(sentiment_signals) > 0:
-            avg_diff = (kronos_signals - sentiment_signals).abs().mean()
-            if avg_diff > 0.5:
-                alerts.append(("🟡", "WARNING", f"Signal divergence detected: Kronos vs FinBERT avg diff {avg_diff:.2f}"))
-    
+        if "Predicted_Return" in live_signals.columns:
+            spread = live_signals["Predicted_Return"].std()
+            if spread and spread < 0.001:
+                alerts.append(("🟡", "WARNING", "Signals have very low cross-sectional dispersion"))
+
     if live_news:
-        # News sentiment spike
         for news in live_news:
             if abs(news.get('score', 0)) > 0.8:
                 alerts.append(("🟡", "WARNING", f"Sentiment spike on {news['ticker']}: {news['score']:+.2f}"))
-    
+
     return alerts
 
 # Check and display alerts
 if data_mode == "Live Pipeline":
-    alerts = check_alerts(live_risk, live_signals, live_news if 'live_news' in locals() else None)
+    alerts = check_alerts(live_risk, live_signals, None, live_snapshot)
     if alerts:
         st.subheader("🚨 Active Alerts")
         for icon, level, message in alerts[:3]:  # Show max 3 alerts
@@ -424,41 +231,68 @@ if data_mode == "Live Pipeline":
 st.header("📈 Portfolio Overview")
 metrics_col1, metrics_col2, metrics_col3, metrics_col4, metrics_col5 = st.columns(5)
 
-with metrics_col1:
-    st.metric(
-        label="Total Return",
-        value="+12.4%",
-        delta="+2.1% vs S&P 500"
-    )
+if data_mode == "Live Pipeline" and live_state:
+    equity = None
+    if live_broker and live_broker.account:
+        equity = live_broker.account.get("equity") or live_broker.account.get("portfolio_value")
+    gross = live_snapshot.get("gross_exposure", 0) if live_snapshot else 0
+    net = live_snapshot.get("net_exposure", 0) if live_snapshot else 0
+    n_pos = live_snapshot.get("num_positions", 0) if live_snapshot else 0
+    regime = live_snapshot.get("macro_regime", "n/a") if live_snapshot else "n/a"
 
-with metrics_col2:
-    st.metric(
-        label="Sharpe Ratio",
-        value="1.87",
-        delta="+0.15"
-    )
+    with metrics_col1:
+        st.metric("Portfolio Value", f"${equity:,.0f}" if equity else "—")
+    with metrics_col2:
+        st.metric("Gross Exposure", f"{gross * 100:.1f}%")
+    with metrics_col3:
+        st.metric("Net Exposure", f"{net * 100:.1f}%")
+    with metrics_col4:
+        st.metric("Target Positions", str(n_pos))
+    with metrics_col5:
+        st.metric("Macro Regime", str(regime))
+# --- Load backtest results once (cached per session) ---
+@st.cache_data(ttl=300)
+def _load_backtest() -> dict:
+    if BACKTEST_RESULTS_PATH.exists():
+        with open(BACKTEST_RESULTS_PATH) as f:
+            return json.load(f)
+    return {}
 
-with metrics_col3:
-    st.metric(
-        label="Max Drawdown",
-        value="-8.3%",
-        delta="-1.2%",
-        delta_color="inverse"
-    )
+backtest_data = _load_backtest()
+bt_metrics = backtest_data.get("metrics", {})
+bt_equity  = backtest_data.get("equity_curve", [])
 
-with metrics_col4:
-    st.metric(
-        label="Active Positions",
-        value="47",
-        delta="+3 today"
-    )
-
-with metrics_col5:
-    st.metric(
-        label="Avg IC (30d)",
-        value="0.142",
-        delta="+0.018"
-    )
+if data_mode != "Live Pipeline" and bt_metrics:
+    with metrics_col1:
+        total_ret = bt_metrics.get("total_return", 0)
+        ann_ret   = bt_metrics.get("ann_return", 0)
+        st.metric(label="Total Return", value=f"{total_ret:.1%}",
+                  delta=f"Ann. {ann_ret:.1%}")
+    with metrics_col2:
+        st.metric(label="Sharpe Ratio", value=f"{bt_metrics.get('sharpe_ratio', 0):.2f}")
+    with metrics_col3:
+        md = bt_metrics.get("max_drawdown", 0)
+        st.metric(label="Max Drawdown", value=f"{md:.1%}", delta_color="inverse")
+    with metrics_col4:
+        st.metric(label="Rebalances", value=str(bt_metrics.get("n_rebalances", "—")))
+    with metrics_col5:
+        st.metric(label="Calmar", value=f"{bt_metrics.get('calmar_ratio', 0):.2f}")
+else:
+    with metrics_col1:
+        st.metric(label="Total Return", value="+12.4%", delta="+2.1% vs S\u0026P 500",
+                  help="⚠\ufe0f Demo — run `python simulator/backtest.py` for real values")
+    with metrics_col2:
+        st.metric(label="Sharpe Ratio", value="1.87", delta="+0.15",
+                  help="⚠\ufe0f Demo")
+    with metrics_col3:
+        st.metric(label="Max Drawdown", value="-8.3%", delta="-1.2%", delta_color="inverse",
+                  help="⚠\ufe0f Demo")
+    with metrics_col4:
+        st.metric(label="Active Positions", value="47", delta="+3 today",
+                  help="⚠\ufe0f Demo")
+    with metrics_col5:
+        st.metric(label="Avg IC (30d)", value="0.142", delta="+0.018",
+                  help="⚠\ufe0f Demo — run pipeline to compute real IC")
 
 st.divider()
 
@@ -468,110 +302,103 @@ col1, col2 = st.columns([2, 1])
 
 with col1:
     st.subheader("Equity Curve with Drawdown")
-    
-    # Generate sample data for demonstration
-    dates = pd.date_range(start=start_date, end=end_date, freq='D')
-    n_days = len(dates)
-    
-    # Simulated equity curve
-    returns = np.random.normal(0.0005, 0.015, n_days)
-    equity = 100 * np.cumprod(1 + returns)
-    
-    # Calculate drawdown
-    peak = np.maximum.accumulate(equity)
-    drawdown = (equity - peak) / peak * 100
-    
-    # Create subplot
+
+    if bt_equity:
+        bt_df = pd.DataFrame(bt_equity)
+        bt_df["date"] = pd.to_datetime(bt_df["date"])
+        # Normalise to 100
+        bt_df["equity"] = bt_df["value"] / bt_df["value"].iloc[0] * 100
+        bt_df["drawdown_pct"] = bt_df["drawdown"] * 100
+        dates   = bt_df["date"]
+        equity  = bt_df["equity"]
+        drawdown = bt_df["drawdown_pct"]
+        data_label = "Backtest (realised)"
+    else:
+        # Clearly labelled demo fallback
+        st.caption("⚠\ufe0f Demo data — run `python simulator/backtest.py` to replace with real results")
+        dates = pd.date_range(start=start_date, end=end_date, freq='D')
+        n_days = len(dates)
+        returns = np.random.normal(0.0005, 0.015, n_days)
+        equity  = 100 * np.cumprod(1 + returns)
+        peak    = np.maximum.accumulate(equity)
+        drawdown = (equity - peak) / peak * 100
+        data_label = "Demo (random)"
+
     fig = make_subplots(
-        rows=2, cols=1,
-        shared_xaxes=True,
-        vertical_spacing=0.03,
-        row_heights=[0.7, 0.3]
+        rows=2, cols=1, shared_xaxes=True,
+        vertical_spacing=0.03, row_heights=[0.7, 0.3]
     )
-    
-    # Equity curve
     fig.add_trace(
-        go.Scatter(
-            x=dates,
-            y=equity,
-            name="Portfolio Value",
-            line=dict(color='#667eea', width=2),
-            fill='tozeroy',
-            fillcolor='rgba(102, 126, 234, 0.1)'
-        ),
+        go.Scatter(x=dates, y=equity, name=data_label,
+                   line=dict(color='#667eea', width=2),
+                   fill='tozeroy', fillcolor='rgba(102, 126, 234, 0.1)'),
         row=1, col=1
     )
-    
-    # Add benchmark
-    benchmark = 100 * np.cumprod(1 + np.random.normal(0.0003, 0.012, n_days))
     fig.add_trace(
-        go.Scatter(
-            x=dates,
-            y=benchmark,
-            name="S&P 500",
-            line=dict(color='gray', width=1, dash='dash')
-        ),
-        row=1, col=1
-    )
-    
-    # Drawdown
-    fig.add_trace(
-        go.Scatter(
-            x=dates,
-            y=drawdown,
-            name="Drawdown %",
-            line=dict(color='red', width=1),
-            fill='tozeroy',
-            fillcolor='rgba(255, 0, 0, 0.2)'
-        ),
+        go.Scatter(x=dates, y=drawdown, name="Drawdown %",
+                   line=dict(color='red', width=1),
+                   fill='tozeroy', fillcolor='rgba(255, 0, 0, 0.2)'),
         row=2, col=1
     )
-    
-    fig.update_layout(
-        height=500,
-        showlegend=True,
-        hovermode='x unified',
-        template='plotly_white'
-    )
-    
-    fig.update_yaxes(title_text="Portfolio Value ($)", row=1, col=1)
+    fig.update_layout(height=500, showlegend=True, hovermode='x unified', template='plotly_white')
+    fig.update_yaxes(title_text="Portfolio Value", row=1, col=1)
     fig.update_yaxes(title_text="Drawdown (%)", row=2, col=1)
     fig.update_xaxes(title_text="Date", row=2, col=1)
-    
     st.plotly_chart(fig, use_container_width=True)
 
 with col2:
     st.subheader("Risk Metrics")
-    
-    risk_data = {
-        "Metric": ["VaR (95%)", "CVaR (95%)", "Volatility", "Beta", "Alpha", "Sortino"],
-        "Value": ["-2.34%", "-3.12%", "14.2%", "0.85", "3.2%", "2.41"],
-        "Status": ["🟢", "🟢", "🟡", "🟢", "🟢", "🟢"]
-    }
-    
-    st.dataframe(
-        pd.DataFrame(risk_data),
-        hide_index=True,
-        use_container_width=True
-    )
-    
+
+    if bt_equity and len(bt_equity) >= 4:
+        rets = pd.Series([r["net_ret"] for r in bt_equity])
+        vals = pd.Series([r["value"]   for r in bt_equity])
+        periods_per_year = 12
+        ann_vol  = float(rets.std() * np.sqrt(periods_per_year))
+        ann_ret  = float((vals.iloc[-1] / vals.iloc[0]) ** (periods_per_year / len(rets)) - 1)
+        sharpe   = ann_ret / ann_vol if ann_vol > 0 else 0.0
+        neg_rets = rets[rets < 0]
+        sortino  = ann_ret / (neg_rets.std() * np.sqrt(periods_per_year)) if len(neg_rets) > 0 else 0.0
+        var_95   = float(np.percentile(rets, 5))
+        cvar_95  = float(rets[rets <= var_95].mean()) if len(rets[rets <= var_95]) > 0 else var_95
+        peak     = vals.cummax()
+        max_dd   = float(((vals - peak) / peak).min())
+
+        def _flag(v, good, warn):
+            return "🟢" if v >= good else ("🟡" if v >= warn else "🔴")
+
+        risk_data = {
+            "Metric": ["VaR (95%)", "CVaR (95%)", "Ann. Volatility", "Ann. Return", "Sharpe", "Sortino"],
+            "Value":  [f"{var_95:.2%}", f"{cvar_95:.2%}", f"{ann_vol:.1%}",
+                       f"{ann_ret:.1%}", f"{sharpe:.2f}", f"{sortino:.2f}"],
+            "Status": [
+                _flag(var_95, -0.05, -0.10),
+                _flag(cvar_95, -0.07, -0.15),
+                _flag(-ann_vol, -0.20, -0.35),
+                _flag(ann_ret, 0.05, 0),
+                _flag(sharpe, 1.0, 0.5),
+                _flag(sortino, 1.2, 0.6),
+            ],
+        }
+    else:
+        st.caption("⚠\ufe0f Demo — run backtest for real risk metrics")
+        risk_data = {
+            "Metric": ["VaR (95%)", "CVaR (95%)", "Volatility", "Beta", "Alpha", "Sortino"],
+            "Value":  ["-2.34%", "-3.12%", "14.2%", "0.85", "3.2%", "2.41"],
+            "Status": ["🟢", "🟢", "🟡", "🟢", "🟢", "🟢"],
+        }
+
+    st.dataframe(pd.DataFrame(risk_data), hide_index=True, use_container_width=True)
+
     st.markdown("---")
-    
     st.subheader("Factor Exposure")
-    
     factors = {
-        "Factor": ["Momentum", "Value", "Quality", "Low Vol", "Size", "Growth"],
+        "Factor":   ["Momentum", "Value", "Quality", "Low Vol", "Size", "Growth"],
         "Exposure": [0.45, -0.12, 0.23, 0.08, -0.05, 0.31],
-        "T-Stat": [3.24, -1.45, 2.18, 0.87, -0.52, 2.76]
+        "T-Stat":   [3.24, -1.45, 2.18, 0.87, -0.52, 2.76]
     }
-    
     fig_factors = px.bar(
-        pd.DataFrame(factors),
-        x="Factor",
-        y="Exposure",
-        color="T-Stat",
-        color_continuous_scale="RdBu",
-        range_color=[-3, 3]
+        pd.DataFrame(factors), x="Factor", y="Exposure",
+        color="T-Stat", color_continuous_scale="RdBu", range_color=[-3, 3]
     )
     fig_factors.update_layout(height=250)
     st.plotly_chart(fig_factors, use_container_width=True)
@@ -584,71 +411,55 @@ signal_col1, signal_col2 = st.columns([1, 1])
 
 with signal_col1:
     st.subheader("Information Coefficient (IC) Decay")
-    
-    # Load real IC history if available, otherwise use simulated
+
     ic_history = load_signal_ic_history()
-    if ic_history is not None and len(ic_history) > 0:
-        # Use real IC data
-        horizons = ["1D", "5D", "10D", "20D", "60D"]
-        ic_kronos = [ic_history['kronos'].iloc[-1] if 'kronos' in ic_history.columns else 0.082,
-                     ic_history['kronos'].tail(5).mean() if 'kronos' in ic_history.columns else 0.068,
-                     ic_history['kronos'].tail(10).mean() if 'kronos' in ic_history.columns else 0.054,
-                     ic_history['kronos'].tail(20).mean() if 'kronos' in ic_history.columns else 0.041,
-                     ic_history['kronos'].tail(60).mean() if 'kronos' in ic_history.columns else 0.028]
-        ic_sentiment = [0.045, 0.038, 0.031, 0.024, 0.018]
-        ic_macro = [0.031, 0.029, 0.027, 0.024, 0.021]
-        
-        # Show data freshness
-        if 'timestamp' in ic_history.columns:
-            st.caption(f"Last IC calculation: {ic_history['timestamp'].iloc[-1]}")
+    horizons = ["1D", "5D", "10D", "20D", "60D"]
+
+    if ic_history is not None and len(ic_history) > 0 and "kronos" in ic_history.columns:
+        # Real IC from ic_history.parquet — compute decay by rolling tail averages
+        k = ic_history["kronos"].dropna()
+        ic_kronos = [
+            float(k.iloc[-1])             if len(k) >= 1  else 0.0,
+            float(k.tail(5).mean())       if len(k) >= 5  else float(k.mean()),
+            float(k.tail(10).mean())      if len(k) >= 10 else float(k.mean()),
+            float(k.tail(20).mean())      if len(k) >= 20 else float(k.mean()),
+            float(k.tail(60).mean())      if len(k) >= 60 else float(k.mean()),
+        ]
+        # FinBERT / Macro ICs not yet computed — show placeholder
+        ic_sentiment = [None] * 5
+        ic_macro     = [None] * 5
+        if "timestamp" in ic_history.columns:
+            st.caption(f"Last IC settlement: {ic_history['timestamp'].iloc[-1]}")
+        else:
+            st.caption("Real IC data from research/ic_history.parquet")
     else:
-        # Simulated IC decay data
-        horizons = ["1D", "5D", "10D", "20D", "60D"]
-        ic_kronos = [0.082, 0.068, 0.054, 0.041, 0.028]
+        st.caption("⚠\ufe0f Demo IC values — run pipeline for 5+ days to compute real ICs")
+        ic_kronos    = [0.082, 0.068, 0.054, 0.041, 0.028]
         ic_sentiment = [0.045, 0.038, 0.031, 0.024, 0.018]
-        ic_macro = [0.031, 0.029, 0.027, 0.024, 0.021]
-    
+        ic_macro     = [0.031, 0.029, 0.027, 0.024, 0.021]
+
     fig_ic = go.Figure()
-    
     fig_ic.add_trace(go.Scatter(
-        x=horizons,
-        y=ic_kronos,
-        name="Kronos",
-        mode='lines+markers',
-        line=dict(color='#667eea', width=2),
-        marker=dict(size=10)
+        x=horizons, y=ic_kronos, name="Kronos",
+        mode='lines+markers', line=dict(color='#667eea', width=2), marker=dict(size=10)
     ))
-    
-    fig_ic.add_trace(go.Scatter(
-        x=horizons,
-        y=ic_sentiment,
-        name="FinBERT",
-        mode='lines+markers',
-        line=dict(color='#f093fb', width=2),
-        marker=dict(size=10)
-    ))
-    
-    fig_ic.add_trace(go.Scatter(
-        x=horizons,
-        y=ic_macro,
-        name="Macro",
-        mode='lines+markers',
-        line=dict(color='#4facfe', width=2),
-        marker=dict(size=10)
-    ))
-    
+    if any(v is not None for v in ic_sentiment):
+        fig_ic.add_trace(go.Scatter(
+            x=horizons, y=ic_sentiment, name="FinBERT",
+            mode='lines+markers', line=dict(color='#f093fb', width=2), marker=dict(size=10)
+        ))
+    if any(v is not None for v in ic_macro):
+        fig_ic.add_trace(go.Scatter(
+            x=horizons, y=ic_macro, name="Macro",
+            mode='lines+markers', line=dict(color='#4facfe', width=2), marker=dict(size=10)
+        ))
+    fig_ic.add_hline(y=0.02, line_dash="dash", line_color="red",
+                     annotation_text="Significance threshold")
     fig_ic.update_layout(
-        xaxis_title="Forecast Horizon",
-        yaxis_title="IC (Rank Correlation)",
-        height=350,
-        template='plotly_white',
+        xaxis_title="Forecast Horizon", yaxis_title="IC (Rank Correlation)",
+        height=350, template='plotly_white',
         legend=dict(orientation="h", yanchor="bottom", y=1.02)
     )
-    
-    # Add IC significance threshold
-    fig_ic.add_hline(y=0.02, line_dash="dash", line_color="red", 
-                     annotation_text="Significance threshold")
-    
     st.plotly_chart(fig_ic, use_container_width=True)
 
 with signal_col2:
@@ -724,149 +535,111 @@ with signal_col2:
 
 st.divider()
 
-# Row 4: Portfolio Heatmap and Positions
+# Row 4: Portfolio Holdings
 st.header("💼 Portfolio Holdings")
 
-# Portfolio heatmap
-st.subheader("Position Heatmap (Weights %)")
+if data_mode == "Live Pipeline":
+    tab_target, tab_actual, tab_drift = st.tabs(["Target (Pipeline)", "Actual (Broker)", "Drift"])
 
-# Sample portfolio data
-portfolio_data = pd.DataFrame(
-    np.random.uniform(-5, 15, (10, 12)),
-    index=["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "JPM", "V", "UNH"],
-    columns=pd.date_range(end=datetime.now(), periods=12, freq='M').strftime('%Y-%m')
-)
+    with tab_target:
+        if live_portfolio is not None and len(live_portfolio) > 0:
+            display = live_portfolio.copy()
+            if "Weight" in display.columns:
+                display["Weight %"] = (display["Weight"] * 100).round(2)
+            st.dataframe(display, use_container_width=True, height=350)
+        else:
+            st.info("No target portfolio. Run: `python3 scripts/run_production.py --once`")
 
-fig_heatmap = px.imshow(
-    portfolio_data,
-    color_continuous_scale="RdBu_r",
-    aspect="auto",
-    range_color=[-10, 20]
-)
+    with tab_actual:
+        if live_broker is not None and not live_broker.positions.empty:
+            actual = live_broker.positions.copy()
+            actual["Weight %"] = (actual["Weight"] * 100).round(2)
+            st.dataframe(actual, use_container_width=True, height=350)
+        else:
+            st.info("Connect Alpaca (ALPACA_API_KEY / ALPACA_SECRET_KEY) for live holdings.")
 
-fig_heatmap.update_layout(
-    height=400,
-    xaxis_title="Month",
-    yaxis_title="Ticker"
-)
+    with tab_drift:
+        if live_drift is not None and len(live_drift) > 0:
+            drift = live_drift.copy()
+            drift["Target %"] = (drift["Target_Weight"] * 100).round(2)
+            drift["Actual %"] = (drift["Actual_Weight"] * 100).round(2)
+            drift["Drift %"] = (drift["Drift"] * 100).round(2)
+            st.dataframe(
+                drift[["Ticker", "Target %", "Actual %", "Drift %"]].head(25),
+                use_container_width=True,
+                height=350,
+            )
+        else:
+            st.info("Drift requires both pipeline targets and broker positions.")
+else:
+    st.subheader("Position Heatmap (Weights %)")
 
-st.plotly_chart(fig_heatmap, use_container_width=True)
+    portfolio_data = pd.DataFrame(
+        np.random.uniform(-5, 15, (10, 12)),
+        index=["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "JPM", "V", "UNH"],
+        columns=pd.date_range(end=datetime.now(), periods=12, freq='M').strftime('%Y-%m')
+    )
 
-# Current positions table
-current_positions = pd.DataFrame({
-    "Ticker": ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "JPM"],
-    "Weight": [8.5, 7.2, 6.8, 5.4, 9.1, 4.2, -3.5, 5.8],
-    "Signal": [0.85, 0.72, 0.68, 0.54, 0.91, 0.42, -0.35, 0.58],
-    "Entry Price": [175.50, 380.25, 142.80, 178.90, 485.20, 485.50, 240.80, 165.40],
-    "Current": [182.30, 395.80, 148.20, 185.40, 520.60, 495.30, 235.20, 170.80],
-    "P&L": [3.87, 4.09, 3.78, 3.64, 7.29, 2.02, -2.32, 3.26],
-    "Sector": ["Tech", "Tech", "Tech", "Tech", "Tech", "Tech", "Tech", "Finance"]
-})
+    fig_heatmap = px.imshow(
+        portfolio_data,
+        color_continuous_scale="RdBu_r",
+        aspect="auto",
+        range_color=[-10, 20]
+    )
+    fig_heatmap.update_layout(height=400, xaxis_title="Month", yaxis_title="Ticker")
+    st.plotly_chart(fig_heatmap, use_container_width=True)
 
-st.dataframe(
-    current_positions.style.format({
-        "Weight": "{:.1f}%",
-        "Signal": "{:.2f}",
-        "Entry Price": "${:.2f}",
-        "Current": "${:.2f}",
-        "P&L": "{:.2f}%"
-    }).background_gradient(subset=["Weight"], cmap="RdBu_r", vmin=-10, vmax=15),
-    use_container_width=True,
-    height=300
-)
+    current_positions = generate_sample_portfolio()
+    st.dataframe(current_positions, use_container_width=True, height=300)
 
 st.divider()
 
-# Row 4.5: Trade Execution Panel (NEW)
+# Row 4.5: Trade Execution Panel
 st.header("🔴 Live Trade Execution")
 exec_col1, exec_col2, exec_col3 = st.columns([2, 1, 1])
 
 with exec_col1:
-    st.subheader("Current Positions")
-    
-    # Use live portfolio data if available
-    if live_portfolio is not None and len(live_portfolio) > 0:
-        positions_df = live_portfolio.copy()
-        # Format for display
-        if 'weight' in positions_df.columns:
-            positions_df['Weight'] = positions_df['weight'].apply(lambda x: f"{x:.2f}%")
-        if 'pnl' in positions_df.columns:
-            positions_df['P&L'] = positions_df['pnl'].apply(lambda x: f"{x:+.2f}%")
-            # Color coding
-            def color_pnl(val):
-                try:
-                    num = float(val.replace('%', '').replace('+', ''))
-                    return 'color: green' if num > 0 else 'color: red' if num < 0 else ''
-                except:
-                    return ''
-            
-            st.dataframe(
-                positions_df.style.applymap(color_pnl, subset=['P&L']),
-                use_container_width=True,
-                height=250
-            )
-        else:
-            st.dataframe(positions_df, use_container_width=True, height=250)
+    st.subheader("Broker Positions (Live)")
+
+    if data_mode == "Live Pipeline" and live_broker is not None and not live_broker.positions.empty:
+        st.dataframe(live_broker.positions, use_container_width=True, height=250)
+    elif data_mode == "Live Pipeline":
+        st.info("No broker positions — check Alpaca keys and KRONOS_MODE.")
     else:
-        # Simulated positions for demo
-        sim_positions = pd.DataFrame({
-            "Ticker": ["AAPL", "MSFT", "NVDA", "TSLA", "AMZN", "GOOGL", "META", "JPM"],
-            "Shares": [1500, 800, 1200, -500, 600, 450, 700, 2000],
-            "Avg Cost": [175.50, 380.25, 485.20, 240.80, 178.90, 142.80, 485.50, 165.40],
-            "Current": [182.30, 395.80, 520.60, 235.20, 185.40, 148.20, 495.30, 170.80],
-            "Unrealized P&L": ["+3.87%", "+4.09%", "+7.29%", "-2.32%", "+3.64%", "+3.78%", "+2.02%", "+3.26%"],
-            "Weight": ["12.5%", "10.2%", "15.1%", "-5.3%", "8.4%", "6.8%", "9.2%", "11.5%"]
-        })
-        
-        def color_pnl(val):
-            try:
-                num = float(val.replace('%', '').replace('+', ''))
-                return 'color: green' if num > 0 else 'color: red' if num < 0 else ''
-            except:
-                return ''
-        
-        st.dataframe(
-            sim_positions.style.applymap(color_pnl, subset=["Unrealized P&L"]),
-            use_container_width=True,
-            height=250
-        )
+        st.dataframe(generate_sample_portfolio(), use_container_width=True, height=250)
 
 with exec_col2:
-    st.subheader("Pending Orders")
-    
-    pending_orders = pd.DataFrame({
-        "Ticker": ["NVDA", "TSLA", "AAPL"],
-        "Side": ["BUY", "COVER", "SELL"],
-        "Qty": [500, 300, 400],
-        "Type": ["LIMIT", "MARKET", "LIMIT"],
-        "Price": ["$515.00", "$235.50", "$185.00"],
-        "Status": ["🟡 Working", "🟡 Pending", "🟡 Working"]
-    })
-    
-    st.dataframe(pending_orders, use_container_width=True, height=200)
-    
-    st.metric("Total Pending", "3 orders")
-    st.metric("Notional", "$485K")
+    st.subheader("Recent Fills")
+
+    trade_history = live_state.trades if live_state else load_trade_history()
+    if data_mode == "Live Pipeline" and trade_history is not None and len(trade_history) > 0:
+        st.dataframe(trade_history.tail(10), use_container_width=True, height=200)
+        st.metric("Total fills logged", len(trade_history))
+    elif data_mode == "Live Pipeline":
+        st.info("No fills yet — trades logged after paper/live rebalances.")
+    else:
+        st.info("Switch to Live Pipeline for execution data.")
 
 with exec_col3:
     st.subheader("Portfolio Summary")
-    
-    # Calculate from live data or use defaults
-    if live_portfolio is not None and 'weight' in live_portfolio.columns:
-        gross_exposure = live_portfolio['weight'].abs().sum()
-        net_exposure = live_portfolio['weight'].sum()
-        long_count = (live_portfolio['weight'] > 0).sum()
-        short_count = (live_portfolio['weight'] < 0).sum()
+
+    if data_mode == "Live Pipeline" and live_broker is not None:
+        acct = live_broker.account
+        st.metric("Equity", f"${float(acct.get('equity', 0)):,.0f}")
+        st.metric("Cash", f"${float(acct.get('cash', 0)):,.0f}")
+        st.metric("Buying Power", f"${float(acct.get('buying_power', 0)):,.0f}")
+        if live_broker.positions is not None and not live_broker.positions.empty:
+            st.metric("Open Positions", len(live_broker.positions))
+    elif data_mode == "Live Pipeline" and live_snapshot:
+        st.metric("Target Gross", f"{live_snapshot.get('gross_exposure', 0) * 100:.1f}%")
+        st.metric("Target Net", f"{live_snapshot.get('net_exposure', 0) * 100:.1f}%")
+        st.metric("Positions", live_snapshot.get("num_positions", 0))
+    elif data_mode == "Live Pipeline":
+        st.warning("No live account data.")
     else:
-        gross_exposure = 145.2
-        net_exposure = 82.5
-        long_count = 12
-        short_count = 3
-    
-    st.metric("Gross Exposure", f"{gross_exposure:.1f}%")
-    st.metric("Net Exposure", f"{net_exposure:.1f}%", delta=f"{net_exposure-100:.1f}%")
-    st.metric("Long/Short", f"{long_count}/{short_count}")
-    st.metric("Cash", f"{100-gross_exposure:.1f}%")
+        st.metric("Gross Exposure", "145.2%")
+        st.metric("Net Exposure", "82.5%")
+        st.metric("Long/Short", "12/3")
 
 st.divider()
 
@@ -995,53 +768,30 @@ st.divider()
 # Row 6: Ensemble Signals
 st.header("🎛️ Signal Ensemble")
 
-ensemble_tickers = ["AAPL", "MSFT", "NVDA", "TSLA"]
-
-for ticker in ensemble_tickers:
-    with st.expander(f"📊 {ticker} - Signal Breakdown"):
-        signal_col1, signal_col2, signal_col3 = st.columns([1, 2, 1])
-        
-        with signal_col1:
-            # Signal scores
+if data_mode == "Live Pipeline" and live_signals is not None and len(live_signals) > 0:
+    signal_cols = [c for c in ["Predicted_Return", "Confidence"] if c in live_signals.columns]
+    st.dataframe(
+        live_signals[signal_cols].head(20) if signal_cols else live_signals.head(20),
+        use_container_width=True,
+    )
+elif data_mode == "Live Pipeline":
+    st.info("No signals cached — run the production pipeline first.")
+else:
+    ensemble_tickers = ["AAPL", "MSFT", "NVDA", "TSLA"]
+    for ticker in ensemble_tickers:
+        with st.expander(f"📊 {ticker} - Signal Breakdown (demo)"):
             kronos_score = np.random.uniform(-1, 1)
             sentiment_score = np.random.uniform(-1, 1)
             macro_score = np.random.uniform(-1, 1)
-            
             final_signal = (
                 kronos_weight * kronos_score +
                 sentiment_weight * sentiment_score +
                 macro_weight * macro_score
             )
-            
-            st.metric("Kronos", f"{kronos_score:+.2f}")
-            st.metric("FinBERT", f"{sentiment_score:+.2f}")
-            st.metric("Macro", f"{macro_score:+.2f}")
-            st.metric("**Final**", f"**{final_signal:+.2f}**")
-        
-        with signal_col2:
-            # Historical signal quality
-            signal_history = pd.DataFrame({
-                "Date": pd.date_range(end=datetime.now(), periods=30, freq='D'),
-                "Kronos": np.random.randn(30).cumsum() * 0.1,
-                "FinBERT": np.random.randn(30).cumsum() * 0.08,
-                "Macro": np.random.randn(30).cumsum() * 0.05,
-                "Ensemble": np.random.randn(30).cumsum() * 0.12
-            })
-            
-            fig_signals = px.line(
-                signal_history,
-                x="Date",
-                y=["Kronos", "FinBERT", "Macro", "Ensemble"],
-                template='plotly_white'
-            )
-            fig_signals.update_layout(height=250, legend=dict(orientation="h"))
-            st.plotly_chart(fig_signals, use_container_width=True)
-        
-        with signal_col3:
-            # Confidence metrics
-            st.metric("Signal Confidence", f"{np.random.uniform(0.6, 0.95):.1%}")
-            st.metric("IC (5D)", f"{np.random.uniform(0.02, 0.12):.3f}")
-            st.metric("Hit Rate", f"{np.random.uniform(0.52, 0.68):.1%}")
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Kronos", f"{kronos_score:+.2f}")
+            c2.metric("FinBERT", f"{sentiment_score:+.2f}")
+            c3.metric("Final", f"{final_signal:+.2f}")
 
 st.divider()
 
@@ -1076,54 +826,43 @@ with news_col1:
             </div>
             """, unsafe_allow_html=True)
     else:
-        # Fallback to simulated news
-        news_data = [
-            {
-                "time": "2 min ago",
-                "headline": "Fed signals potential rate cuts in Q3 amid cooling inflation",
-                "source": "Reuters",
-                "url": "https://www.reuters.com/markets/us/fed-signals-potential-rate-cuts-2024-04-12/",
-                "ticker": "SPY",
-                "sentiment": "positive",
-                "score": 0.78,
-                "impact": "High"
-            },
-            {
-                "time": "15 min ago",
-                "headline": "AAPL reports stronger-than-expected Q4 iPhone sales in China",
-                "source": "Bloomberg",
-                "url": "https://www.bloomberg.com/news/articles/2024-04-12/apple-iphone-sales-china-beat-estimates",
-                "ticker": "AAPL",
-                "sentiment": "positive",
-                "score": 0.85,
-                "impact": "High"
-            },
-            {
-                "time": "32 min ago",
-                "headline": "NVDA faces new export restrictions on AI chips to China",
-                "source": "WSJ",
-                "url": "https://www.wsj.com/articles/nvidia-ai-chip-export-restrictions-china-2024-04-12",
-                "ticker": "NVDA",
-                "sentiment": "negative",
-                "score": -0.72,
-                "impact": "High"
-            }
-        ]
-        
-        for news in news_data:
-            sentiment_color = "🟢" if news["sentiment"] == "positive" else "🔴" if news["sentiment"] == "negative" else "🟡"
-            score_display = f"{news['score']:+.2f}"
-            border_color = "green" if news["sentiment"] == "positive" else "red" if news["sentiment"] == "negative" else "orange"
-            
-            headline_html = f"<a href='{news['url']}' target='_blank' style='font-weight: 500; color: inherit; text-decoration: none;'>🔗 {news['headline']}</a>"
-            
-            st.markdown(f"""
-            <div style="padding: 10px; border-left: 4px solid {border_color}; margin-bottom: 10px; background: rgba(0,0,0,0.02); border-radius: 4px;">
-                <div style="font-size: 12px; color: gray;">{news['time']} • {news['source']} • {news['ticker']}</div>
-                {headline_html}
-                <div style="font-size: 12px;">{sentiment_color} Sentiment: <b>{score_display}</b> • Impact: {news['impact']}</div>
-            </div>
-            """, unsafe_allow_html=True)
+        if data_mode == "Live Pipeline":
+            st.info("No news returned. Set NEWSAPI_KEY or check rate limits.")
+        else:
+            news_data = [
+                {
+                    "time": "2 min ago",
+                    "headline": "Fed signals potential rate cuts in Q3 amid cooling inflation",
+                    "source": "Reuters",
+                    "url": "https://www.reuters.com/markets/us/fed-signals-potential-rate-cuts-2024-04-12/",
+                    "ticker": "SPY",
+                    "sentiment": "positive",
+                    "score": 0.78,
+                    "impact": "High"
+                },
+                {
+                    "time": "15 min ago",
+                    "headline": "AAPL reports stronger-than-expected Q4 iPhone sales in China",
+                    "source": "Bloomberg",
+                    "url": "https://www.bloomberg.com/news/articles/2024-04-12/apple-iphone-sales-china-beat-estimates",
+                    "ticker": "AAPL",
+                    "sentiment": "positive",
+                    "score": 0.85,
+                    "impact": "High"
+                },
+            ]
+            for news in news_data:
+                sentiment_color = "🟢" if news["sentiment"] == "positive" else "🔴" if news["sentiment"] == "negative" else "🟡"
+                score_display = f"{news['score']:+.2f}"
+                border_color = "green" if news["sentiment"] == "positive" else "red" if news["sentiment"] == "negative" else "orange"
+                headline_html = f"<a href='{news['url']}' target='_blank' style='font-weight: 500; color: inherit; text-decoration: none;'>🔗 {news['headline']}</a>"
+                st.markdown(f"""
+                <div style="padding: 10px; border-left: 4px solid {border_color}; margin-bottom: 10px; background: rgba(0,0,0,0.02); border-radius: 4px;">
+                    <div style="font-size: 12px; color: gray;">{news['time']} • {news['source']} • {news['ticker']}</div>
+                    {headline_html}
+                    <div style="font-size: 12px;">{sentiment_color} Sentiment: <b>{score_display}</b> • Impact: {news['impact']}</div>
+                </div>
+                """, unsafe_allow_html=True)
 
 with news_col2:
     st.subheader("Sentiment Distribution")

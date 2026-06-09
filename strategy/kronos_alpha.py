@@ -87,26 +87,53 @@ class KronosAlphaGenerator:
         Returns a DataFrame mapping Ticker -> Predicted Return
         """
         if not KRONOS_AVAILABLE or self.predictor is None:
-            print("Kronos not loaded. Returning mock signals.")
-            return self._mock_signals(ohlcv_data.keys())
+            raise RuntimeError(
+                "Kronos model not loaded. Install dependencies and ensure model weights are available."
+            )
 
-        # Prepare lists for batching
-        tickers = list(ohlcv_data.keys())
         df_list = []
         x_timestamp_list = []
         y_timestamp_list = []
+        valid_tickers = []
 
         # Kronos predict_batch requires all matrices to be the EXACT same length
         max_possible_len = max(len(df) for df in ohlcv_data.values())
         strict_len = int(max_possible_len * 0.95) # Tolerate missing holidays, drop IPOs
         
-        for ticker in tickers:
+        for ticker in ohlcv_data:
             df = ohlcv_data[ticker]
             if len(df) < strict_len:
-                print(f"Skipping {ticker} (len {len(df)} < {strict_len} required for tensor batching).")
                 continue
-                
-            x_df = df.iloc[-strict_len:].reset_index(drop=True)
+            
+            # Ensure df has timestamps column from index
+            df_processed = df.copy()
+            if isinstance(df_processed.index, pd.DatetimeIndex):
+                df_processed['timestamps'] = df_processed.index
+            elif 'timestamps' not in df_processed.columns:
+                # Try to infer from Date or Datetime column
+                if 'Date' in df_processed.columns:
+                    df_processed['timestamps'] = pd.to_datetime(df_processed['Date'])
+                elif 'Datetime' in df_processed.columns:
+                    df_processed['timestamps'] = pd.to_datetime(df_processed['Datetime'])
+                else:
+                    continue
+            
+            x_df = df_processed.iloc[-strict_len:].reset_index(drop=True)
+            
+            # Ensure timestamps is datetime
+            x_df['timestamps'] = pd.to_datetime(x_df['timestamps'])
+            
+            # Standardize column names (yFinance uses Open/High/Low/Close/Volume)
+            col_map = {}
+            for col in x_df.columns:
+                col_lower = col.lower()
+                if col_lower in ['open', 'high', 'low', 'close', 'volume']:
+                    col_map[col] = col_lower
+            x_df = x_df.rename(columns=col_map)
+            
+            # Add amount column if missing (calculated as close * volume)
+            if 'amount' not in x_df.columns:
+                x_df['amount'] = x_df['close'] * x_df['volume']
             
             # Predict arbitrary future timestamps (e.g. next N days)
             last_timestamp = x_df['timestamps'].iloc[-1]
@@ -115,6 +142,7 @@ class KronosAlphaGenerator:
             df_list.append(x_df[['open', 'high', 'low', 'close', 'volume', 'amount']])
             x_timestamp_list.append(x_df['timestamps'])
             y_timestamp_list.append(pd.Series(future_timestamps))
+            valid_tickers.append(ticker)
 
         if not df_list:
             return pd.DataFrame()
@@ -155,7 +183,7 @@ class KronosAlphaGenerator:
         # Calculate expected momentum (Percentage return from current to last predicted close)
         signals = []
         for i, pred_df in enumerate(pred_df_list):
-            ticker = tickers[i]
+            ticker = valid_tickers[i]
             x_df = df_list[i]
             
             current_close = x_df['close'].iloc[-1]
@@ -170,14 +198,6 @@ class KronosAlphaGenerator:
             
         signal_df = pd.DataFrame(signals).set_index('Ticker')
         return signal_df.sort_values(by='Predicted_Return', ascending=False)
-        
-    def _mock_signals(self, tickers):
-        # Mocks a random momentum signal if Kronos isn't actually installed
-        import numpy as np
-        signals = []
-        for ticker in tickers:
-            signals.append({'Ticker': ticker, 'Predicted_Return': np.random.normal(0, 0.05)})
-        return pd.DataFrame(signals).set_index('Ticker').sort_values(by='Predicted_Return', ascending=False)
 
 if __name__ == "__main__":
     import numpy as np
