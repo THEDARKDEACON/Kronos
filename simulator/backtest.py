@@ -97,11 +97,16 @@ class WalkForwardBacktest:
         self.universe_limit = universe_limit
 
         # --- Fetch universe and fundamentals ONCE using today's cached data ---
-        # Historical yfinance balance-sheet data is slow and frequently empty for
-        # dates >12 months ago. Using today's fundamentals as universe proxy is a
-        # standard simplification for backtesting — the S&P 500 composition and
-        # quality filter change slowly.
+        # ⚠️  SURVIVORSHIP BIAS WARNING (H-3): using today's fundamentals means the
+        # universe is filtered by *current* quality metrics, which systematically
+        # favours companies that survived and are healthy right now.  Historical
+        # rebalance steps therefore see a cleaner universe than would have existed
+        # at that point in time, inflating reported Sharpe and Calmar ratios.
+        # Mitigation: store point-in-time S&P constituent snapshots (one .parquet
+        # per year) and load the appropriate snapshot per rebalance date.
         print("Fetching universe and fundamentals (once, using today's cache)...")
+        print("[WARNING] Backtest uses today's fundamentals for all historical steps — "
+              "survivorship bias will inflate performance metrics.")
         universe = get_universe()
         fundamentals_df = get_fundamentals(universe, as_of_date=None)  # today's cache
         safe_tickers = get_safe_universe(fundamentals_df, drop_bottom_pct=0.25)

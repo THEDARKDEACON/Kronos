@@ -7,8 +7,6 @@ Uses FinBERT model fine-tuned on financial text.
 import pandas as pd
 import numpy as np
 from typing import List, Dict, Optional, Union, Tuple
-from dataclasses import dataclass
-import numpy as np
 import time
 from urllib.parse import quote
 import requests
@@ -204,7 +202,9 @@ class FinBERTSentimentAnalyzer:
             logits = ort_outputs[0]
             
             # Get prediction
-            probs = np.exp(logits) / np.sum(np.exp(logits), axis=-1, keepdims=True)
+            # M-10 Fix: Numerically stable softmax to avoid np.exp overflow
+            shifted_logits = logits - np.max(logits, axis=-1, keepdims=True)
+            probs = np.exp(shifted_logits) / np.sum(np.exp(shifted_logits), axis=-1, keepdims=True)
             pred_idx = np.argmax(probs, axis=-1)[0]
             confidence = float(np.max(probs))
             
@@ -483,8 +483,11 @@ class EarningsSentimentExtractor:
         # Analyze each segment
         sentiments = self.analyzer.analyze_batch(segments)
         
-        # Weight by segment position (management discussion gets higher weight)
-        weights = [1.0 / (i + 1) for i in range(len(segments))]
+        # L-12 Fix: A strict 1/(i+1) positional decay assumes the first paragraph
+        # is the most important, but in earnings calls the first 2-3 paragraphs are
+        # typically legal safe-harbor disclaimers. We use a gentler decay that gives
+        # equal weight to the first 5 segments (prepared remarks), then decays.
+        weights = [1.0 if i < 5 else 5.0 / (i + 1) for i in range(len(segments))]
         total_weight = sum(weights)
         
         weighted_sentiment = sum(s * w for (s, _), w in zip(sentiments, weights)) / total_weight

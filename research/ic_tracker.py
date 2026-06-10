@@ -118,15 +118,22 @@ def settle_predictions(ohlcv_dict: Dict[str, pd.DataFrame]) -> None:
                 continue
             df = df.sort_values("timestamps").reset_index(drop=True)
 
-            # Find the row on / just after as_of_date
+            # H-9 Fix: Find the row exactly 5 business days after as_of_ts
             try:
                 as_of_ts = pd.Timestamp(date_str)
-                idx_start = df[df["timestamps"] >= as_of_ts].index[0]
-                idx_end = min(idx_start + 5, len(df) - 1)
-                price_start = df.loc[idx_start, "close"]
-                price_end = df.loc[idx_end, "close"]
-                if price_start > 0:
-                    realized[ticker] = (price_end - price_start) / price_start
+                # Find exactly 5 business days forward
+                target_ts = as_of_ts + pd.offsets.BDay(5)
+                
+                start_mask = df["timestamps"] >= as_of_ts
+                end_mask = df["timestamps"] >= target_ts
+                
+                if start_mask.any() and end_mask.any():
+                    idx_start = df[start_mask].index[0]
+                    idx_end = df[end_mask].index[0]
+                    price_start = df.loc[idx_start, "close"]
+                    price_end = df.loc[idx_end, "close"]
+                    if price_start > 0:
+                        realized[ticker] = (price_end - price_start) / price_start
             except (IndexError, KeyError):
                 continue
 

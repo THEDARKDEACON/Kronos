@@ -164,7 +164,10 @@ def main() -> None:
     if freq == 'daily':
         schedule.every().day.at(run_time).do(run_once)
     elif freq == 'monthly':
-        schedule.every().month.at(run_time).do(run_once)
+        # schedule has no .month attribute; use 4-week approximation.
+        # For exact calendar-month scheduling use APScheduler or cron instead.
+        schedule.every(4).weeks.do(run_once)
+        logger.warning("Monthly scheduling approximated as every 4 weeks. Use APScheduler/cron for exact dates.")
     else:
         schedule.every().monday.at(run_time).do(run_once)
 

@@ -400,8 +400,14 @@ def calculate_ruin_probability(win_prob: float,
     
     Based on Gambler's Ruin theorem for biased random walk.
     """
-    if win_prob >= 0.5:
-        return 0.0  # No risk of ruin with positive edge
+    # Ruin is only impossible when the expected value is strictly positive
+    expected_value = win_prob * win_size - (1 - win_prob) * loss_size
+    if expected_value > 0 and bankroll >= target_wealth:
+        return 0.0  # Already at or past target; no ruin path
+    if expected_value <= 0:
+        # Zero or negative edge — ruin is possible even with win_prob ≥ 0.5
+        # Fall through to the gambler's-ruin formula below
+        pass
     
     if win_prob == 0:
         return 1.0  # Certain ruin

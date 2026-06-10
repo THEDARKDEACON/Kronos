@@ -19,8 +19,9 @@ import os
 # Add project root to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-BACKTEST_RESULTS_PATH = Path("experiments/backtest_results.json")
-IC_HISTORY_PATH = Path("research/ic_history.parquet")
+ROOT_DIR = Path(__file__).resolve().parent.parent
+BACKTEST_RESULTS_PATH = ROOT_DIR / "experiments/backtest_results.json"
+IC_HISTORY_PATH = ROOT_DIR / "research/ic_history.parquet"
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -110,42 +111,6 @@ days_back = st.sidebar.slider("Days to analyze", 7, 365, 30)
 end_date = datetime.now()
 start_date = end_date - timedelta(days=days_back)
 
-# Universe filter
-st.sidebar.header("Universe Filter")
-show_tickers = st.sidebar.multiselect(
-    "Select tickers to display",
-    ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "JPM", "V", "UNH"],
-    default=["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA"]
-)
-
-# Signal weights
-st.sidebar.header("Ensemble Weights")
-kronos_weight = st.sidebar.slider("Kronos", 0.0, 1.0, 0.5, 0.1)
-sentiment_weight = st.sidebar.slider("FinBERT", 0.0, 1.0, 0.3, 0.1)
-macro_weight = st.sidebar.slider("Macro", 0.0, 1.0, 0.2, 0.1)
-
-# Normalize weights
-total = kronos_weight + sentiment_weight + macro_weight
-if total > 0:
-    kronos_weight /= total
-    sentiment_weight /= total
-    macro_weight /= total
-
-st.sidebar.metric("Normalized Kronos", f"{kronos_weight:.1%}")
-st.sidebar.metric("Normalized FinBERT", f"{sentiment_weight:.1%}")
-st.sidebar.metric("Normalized Macro", f"{macro_weight:.1%}")
-
-# Auto-refresh for live mode
-st.sidebar.markdown("---")
-st.sidebar.header("🔄 Auto-Refresh")
-auto_refresh = st.sidebar.checkbox("Enable 30s auto-refresh", value=(data_mode == "Live Pipeline"))
-if auto_refresh and data_mode == "Live Pipeline":
-    st_autorefresh(interval=30000, limit=None, key="live_refresh")
-    st.sidebar.success("✅ Auto-refresh enabled")
-
-# Main dashboard
-st.title("📊 Kronos Quant Pipeline Dashboard")
-
 # Load live data based on mode
 live_state = None
 live_portfolio = None
@@ -163,6 +128,24 @@ if data_mode == "Live Pipeline":
     live_risk = live_state.risk
     live_broker = live_state.broker
     live_drift = live_state.drift
+
+# M-15 Fix: Dynamic Universe Filter
+st.sidebar.header("Universe Filter")
+available_tickers = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "JPM", "V", "UNH"]
+default_tickers = available_tickers[:5]
+
+if live_portfolio is not None and not live_portfolio.empty:
+    if "Ticker" in live_portfolio.columns:
+        available_tickers = live_portfolio["Ticker"].tolist()
+    else:
+        available_tickers = live_portfolio.index.tolist()
+    default_tickers = available_tickers[:10]
+
+show_tickers = st.sidebar.multiselect(
+    "Select tickers to display",
+    available_tickers,
+    default=default_tickers
+)
 
 # Display data freshness in sidebar
 st.sidebar.markdown("---")
@@ -231,43 +214,33 @@ if data_mode == "Live Pipeline":
 st.header("📈 Portfolio Overview")
 metrics_col1, metrics_col2, metrics_col3, metrics_col4, metrics_col5 = st.columns(5)
 
-if data_mode == "Live Pipeline" and live_state:
-    equity = None
-    if live_broker and live_broker.account:
-        equity = live_broker.account.get("equity") or live_broker.account.get("portfolio_value")
-    gross = live_snapshot.get("gross_exposure", 0) if live_snapshot else 0
-    net = live_snapshot.get("net_exposure", 0) if live_snapshot else 0
-    n_pos = live_snapshot.get("num_positions", 0) if live_snapshot else 0
-    regime = live_snapshot.get("macro_regime", "n/a") if live_snapshot else "n/a"
+if data_mode == "Live Pipeline":
+    if live_state:
+        equity = None
+        if live_broker and live_broker.account:
+            equity = live_broker.account.get("equity") or live_broker.account.get("portfolio_value")
+        gross = live_snapshot.get("gross_exposure", 0) if live_snapshot else 0
+        net = live_snapshot.get("net_exposure", 0) if live_snapshot else 0
+        n_pos = live_snapshot.get("num_positions", 0) if live_snapshot else 0
+        regime = live_snapshot.get("macro_regime", "n/a") if live_snapshot else "n/a"
 
-    with metrics_col1:
-        st.metric("Portfolio Value", f"${equity:,.0f}" if equity else "—")
-    with metrics_col2:
-        st.metric("Gross Exposure", f"{gross * 100:.1f}%")
-    with metrics_col3:
-        st.metric("Net Exposure", f"{net * 100:.1f}%")
-    with metrics_col4:
-        st.metric("Target Positions", str(n_pos))
-    with metrics_col5:
-        st.metric("Macro Regime", str(regime))
-# --- Load backtest results once (cached per session) ---
-@st.cache_data(ttl=300)
-def _load_backtest() -> dict:
-    if BACKTEST_RESULTS_PATH.exists():
-        with open(BACKTEST_RESULTS_PATH) as f:
-            return json.load(f)
-    return {}
-
-backtest_data = _load_backtest()
-bt_metrics = backtest_data.get("metrics", {})
-bt_equity  = backtest_data.get("equity_curve", [])
-
-if data_mode != "Live Pipeline" and bt_metrics:
+        with metrics_col1:
+            st.metric("Portfolio Value", f"${equity:,.0f}" if equity else "—")
+        with metrics_col2:
+            st.metric("Gross Exposure", f"{gross * 100:.1f}%")
+        with metrics_col3:
+            st.metric("Net Exposure", f"{net * 100:.1f}%")
+        with metrics_col4:
+            st.metric("Target Positions", str(n_pos))
+        with metrics_col5:
+            st.metric("Macro Regime", str(regime))
+    else:
+        st.info("Awaiting live pipeline data.")
+elif data_mode != "Live Pipeline" and bt_metrics:
     with metrics_col1:
         total_ret = bt_metrics.get("total_return", 0)
         ann_ret   = bt_metrics.get("ann_return", 0)
-        st.metric(label="Total Return", value=f"{total_ret:.1%}",
-                  delta=f"Ann. {ann_ret:.1%}")
+        st.metric(label="Total Return", value=f"{total_ret:.1%}", delta=f"Ann. {ann_ret:.1%}")
     with metrics_col2:
         st.metric(label="Sharpe Ratio", value=f"{bt_metrics.get('sharpe_ratio', 0):.2f}")
     with metrics_col3:
@@ -278,21 +251,7 @@ if data_mode != "Live Pipeline" and bt_metrics:
     with metrics_col5:
         st.metric(label="Calmar", value=f"{bt_metrics.get('calmar_ratio', 0):.2f}")
 else:
-    with metrics_col1:
-        st.metric(label="Total Return", value="+12.4%", delta="+2.1% vs S\u0026P 500",
-                  help="⚠\ufe0f Demo — run `python simulator/backtest.py` for real values")
-    with metrics_col2:
-        st.metric(label="Sharpe Ratio", value="1.87", delta="+0.15",
-                  help="⚠\ufe0f Demo")
-    with metrics_col3:
-        st.metric(label="Max Drawdown", value="-8.3%", delta="-1.2%", delta_color="inverse",
-                  help="⚠\ufe0f Demo")
-    with metrics_col4:
-        st.metric(label="Active Positions", value="47", delta="+3 today",
-                  help="⚠\ufe0f Demo")
-    with metrics_col5:
-        st.metric(label="Avg IC (30d)", value="0.142", delta="+0.018",
-                  help="⚠\ufe0f Demo — run pipeline to compute real IC")
+    st.info("Awaiting backtest data.")
 
 st.divider()
 
@@ -380,28 +339,11 @@ with col2:
             ],
         }
     else:
-        st.caption("⚠\ufe0f Demo — run backtest for real risk metrics")
-        risk_data = {
-            "Metric": ["VaR (95%)", "CVaR (95%)", "Volatility", "Beta", "Alpha", "Sortino"],
-            "Value":  ["-2.34%", "-3.12%", "14.2%", "0.85", "3.2%", "2.41"],
-            "Status": ["🟢", "🟢", "🟡", "🟢", "🟢", "🟢"],
-        }
-
-    st.dataframe(pd.DataFrame(risk_data), hide_index=True, use_container_width=True)
+        st.info("Run backtest to view real risk metrics.")
 
     st.markdown("---")
     st.subheader("Factor Exposure")
-    factors = {
-        "Factor":   ["Momentum", "Value", "Quality", "Low Vol", "Size", "Growth"],
-        "Exposure": [0.45, -0.12, 0.23, 0.08, -0.05, 0.31],
-        "T-Stat":   [3.24, -1.45, 2.18, 0.87, -0.52, 2.76]
-    }
-    fig_factors = px.bar(
-        pd.DataFrame(factors), x="Factor", y="Exposure",
-        color="T-Stat", color_continuous_scale="RdBu", range_color=[-3, 3]
-    )
-    fig_factors.update_layout(height=250)
-    st.plotly_chart(fig_factors, use_container_width=True)
+    st.info("Factor exposure modeling is not yet available in the live pipeline.")
 
 st.divider()
 
@@ -433,10 +375,10 @@ with signal_col1:
         else:
             st.caption("Real IC data from research/ic_history.parquet")
     else:
-        st.caption("⚠\ufe0f Demo IC values — run pipeline for 5+ days to compute real ICs")
-        ic_kronos    = [0.082, 0.068, 0.054, 0.041, 0.028]
-        ic_sentiment = [0.045, 0.038, 0.031, 0.024, 0.018]
-        ic_macro     = [0.031, 0.029, 0.027, 0.024, 0.021]
+        st.info("Awaiting 5-day settlement to compute real IC.")
+        ic_kronos    = [0.0] * 5
+        ic_sentiment = [None] * 5
+        ic_macro     = [None] * 5
 
     fig_ic = go.Figure()
     fig_ic.add_trace(go.Scatter(
@@ -465,10 +407,9 @@ with signal_col1:
 with signal_col2:
     st.subheader("Model Performance Drift")
     
-    # Alpha decay visualization
     if live_signals is not None and len(live_signals) > 0:
-        st.metric("Signal Half-Life", "8.2 days", delta="-0.3 days")
-        st.metric("FinBERT Confidence", f"{np.random.uniform(0.75, 0.95):.1%}", delta="+2.1%")
+        conf = live_signals.get("Confidence", pd.Series([0.0])).mean()
+        st.metric("Kronos Mean Confidence", f"{conf:.1%}")
         
         # Regime detection indicator
         if live_risk and 'regime' in live_risk:
@@ -486,52 +427,8 @@ with signal_col2:
                 <small>Equity Bias: {regime.get('equity_bias', 0):+.2f}</small>
             </div>
             """, unsafe_allow_html=True)
-        else:
-            st.metric("Current Regime", "Risk-On 🟢")
     else:
-        st.metric("Signal Half-Life", "8.2 days", delta="-0.3 days")
-        st.metric("FinBERT Confidence", "87.3%", delta="+2.1%")
-        st.metric("Current Regime", "Risk-On 🟢")
-    
-    st.markdown("---")
-    st.subheader("Signal Turnover Analysis")
-    
-    # Simulated turnover data
-    turnover_data = pd.DataFrame({
-        "Date": pd.date_range(end=datetime.now(), periods=30, freq='D'),
-        "Portfolio Turnover": np.random.uniform(0.05, 0.25, 30),
-        "Signal Stability": np.random.uniform(0.6, 0.9, 30)
-    })
-    
-    fig_turnover = make_subplots(specs=[[{"secondary_y": True}]])
-    
-    fig_turnover.add_trace(
-        go.Bar(
-            x=turnover_data["Date"],
-            y=turnover_data["Portfolio Turnover"],
-            name="Turnover",
-            marker_color='rgba(102, 126, 234, 0.6)'
-        ),
-        secondary_y=False
-    )
-    
-    fig_turnover.add_trace(
-        go.Scatter(
-            x=turnover_data["Date"],
-            y=turnover_data["Signal Stability"],
-            name="Signal Stability",
-            mode='lines',
-            line=dict(color='red', width=2)
-        ),
-        secondary_y=True
-    )
-    
-    fig_turnover.update_layout(
-        height=350,
-        template='plotly_white'
-    )
-    
-    st.plotly_chart(fig_turnover, use_container_width=True)
+        st.info("Awaiting live signals.")
 
 st.divider()
 
@@ -572,25 +469,7 @@ if data_mode == "Live Pipeline":
         else:
             st.info("Drift requires both pipeline targets and broker positions.")
 else:
-    st.subheader("Position Heatmap (Weights %)")
-
-    portfolio_data = pd.DataFrame(
-        np.random.uniform(-5, 15, (10, 12)),
-        index=["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "JPM", "V", "UNH"],
-        columns=pd.date_range(end=datetime.now(), periods=12, freq='M').strftime('%Y-%m')
-    )
-
-    fig_heatmap = px.imshow(
-        portfolio_data,
-        color_continuous_scale="RdBu_r",
-        aspect="auto",
-        range_color=[-10, 20]
-    )
-    fig_heatmap.update_layout(height=400, xaxis_title="Month", yaxis_title="Ticker")
-    st.plotly_chart(fig_heatmap, use_container_width=True)
-
-    current_positions = generate_sample_portfolio()
-    st.dataframe(current_positions, use_container_width=True, height=300)
+    st.info("Switch to Live Pipeline to view holdings, or run a Backtest.")
 
 st.divider()
 
@@ -650,118 +529,42 @@ tca_col1, tca_col2 = st.columns([1, 1])
 with tca_col1:
     st.subheader("Market Impact Model (Almgren-Chriss)")
     
-    # Sample trade data
-    trades = pd.DataFrame({
-        "Trade Size ($)": [1e6, 2.5e6, 500e3, 1.5e6, 3e6],
-        "Participation Rate": [0.05, 0.12, 0.03, 0.08, 0.15],
-        "Expected Impact (bps)": [12.5, 28.3, 8.2, 18.7, 35.4],
-        "Actual Impact (bps)": [11.8, 29.5, 7.9, 17.2, 33.1],
-        "Timing": ["VWAP", "TWAP", "VWAP", "POV", "TWAP"]
-    })
+    trade_history = live_state.trades if (live_state and hasattr(live_state, 'trades')) else load_trade_history()
     
-    fig_impact = px.scatter(
-        trades,
-        x="Participation Rate",
-        y="Expected Impact (bps)",
-        size="Trade Size ($)",
-        color="Timing",
-        hover_data=["Actual Impact (bps)"],
-        size_max=40
-    )
-    
-    # Add model curve
-    x_curve = np.linspace(0.01, 0.2, 100)
-    y_curve = 200 * x_curve + 500 * x_curve**2  # Almgren-Chriss approx
-    
-    fig_impact.add_trace(
-        go.Scatter(
-            x=x_curve,
-            y=y_curve,
-            mode='lines',
-            name='Model Prediction',
-            line=dict(dash='dash', color='red')
+    if trade_history is not None and not trade_history.empty and 'expected_price' in trade_history.columns and 'filled_price' in trade_history.columns:
+        trades = trade_history.copy()
+        trades["Trade Size ($)"] = trades["qty"] * trades["filled_price"]
+        trades["Actual Impact (bps)"] = abs(trades["filled_price"] - trades["expected_price"]) / trades["expected_price"] * 10000
+        fig_impact = px.scatter(
+            trades,
+            x="Trade Size ($)",
+            y="Actual Impact (bps)",
+            hover_data=["symbol"],
+            title="Realized Slippage by Trade Size"
         )
-    )
-    
-    fig_impact.update_layout(height=350, template='plotly_white')
-    st.plotly_chart(fig_impact, use_container_width=True)
+        fig_impact.update_layout(height=350, template='plotly_white')
+        st.plotly_chart(fig_impact, use_container_width=True)
+    else:
+        st.info("Awaiting live trade execution data to compute market impact.")
 
 with tca_col2:
     st.subheader("Execution Quality Summary")
     
-    # Load live trade history
-    trade_history = load_trade_history()
-    
-    if trade_history is not None and len(trade_history) > 0:
-        # Calculate metrics from live data
-        avg_slippage = trade_history.get('slippage_bps', pd.Series([15.2])).mean()
-        fill_rate = (trade_history['status'] == 'FILLED').mean() * 100 if 'status' in trade_history.columns else 98.5
-        avg_latency = trade_history.get('latency_ms', pd.Series([45])).mean()
+    if trade_history is not None and not trade_history.empty:
+        fill_rate = (trade_history['status'] == 'FILLED').mean() * 100 if 'status' in trade_history.columns else 100.0
         
+        avg_slippage = 0.0
+        if 'expected_price' in trade_history.columns and 'filled_price' in trade_history.columns:
+            slippage = abs(trade_history["filled_price"] - trade_history["expected_price"]) / trade_history["expected_price"] * 10000
+            avg_slippage = slippage.mean()
+            
         exec_metrics = pd.DataFrame({
-            "Metric": [
-                "Avg Implementation Shortfall",
-                "Avg Market Impact",
-                "Timing Cost",
-                "Opportunity Cost",
-                "Total TCA"
-            ],
-            "Value (bps)": [f"{avg_slippage:.1f}", "18.5", "8.3", "5.2", f"{avg_slippage + 13.5:.1f}"],
-            "vs Benchmark": ["-2.1", "+1.3", "-0.8", "-1.5", "-2.8"],
-            "Status": ["🟢", "🟡", "🟢", "🟢", "🟢"]
+            "Metric": ["Avg Slippage (bps)", "Fill Rate (%)", "Total Fills"],
+            "Value": [f"{avg_slippage:.1f}", f"{fill_rate:.1f}%", f"{len(trade_history)}"]
         })
-        
-        st.dataframe(
-            exec_metrics,
-            hide_index=True,
-            use_container_width=True
-        )
-        
-        st.markdown("---")
-        
-        # Broker comparison with live data
-        st.subheader("Broker Performance")
-        
-        broker_data = pd.DataFrame({
-            "Broker": ["Alpaca", "Interactive Brokers"],
-            "Fill Rate": [f"{fill_rate:.1f}%", "99.2%"],
-            "Avg Slippage": [f"{avg_slippage:.1f} bps", "2.1 bps"],
-            "Latency": [f"{avg_latency:.0f}ms", "28ms"]
-        })
+        st.dataframe(exec_metrics, hide_index=True, use_container_width=True)
     else:
-        # Default metrics
-        exec_metrics = pd.DataFrame({
-            "Metric": [
-                "Avg Implementation Shortfall",
-                "Avg Market Impact",
-                "Timing Cost",
-                "Opportunity Cost",
-                "Total TCA"
-            ],
-            "Value (bps)": [15.2, 18.5, 8.3, 5.2, 28.7],
-            "vs Benchmark": ["-2.1", "+1.3", "-0.8", "-1.5", "-2.8"],
-            "Status": ["🟢", "🟡", "🟢", "🟢", "🟢"]
-        })
-        
-        st.dataframe(
-            exec_metrics,
-            hide_index=True,
-            use_container_width=True
-        )
-        
-        st.markdown("---")
-        
-        # Broker comparison
-        st.subheader("Broker Performance")
-        
-        broker_data = pd.DataFrame({
-            "Broker": ["Alpaca", "Interactive Brokers"],
-            "Fill Rate": ["98.5%", "99.2%"],
-            "Avg Slippage": ["3.2 bps", "2.1 bps"],
-            "Latency": ["45ms", "28ms"]
-        })
-    
-    st.dataframe(broker_data, hide_index=True, use_container_width=True)
+        st.info("No trades logged yet.")
 
 st.divider()
 
@@ -826,302 +629,59 @@ with news_col1:
             </div>
             """, unsafe_allow_html=True)
     else:
-        if data_mode == "Live Pipeline":
-            st.info("No news returned. Set NEWSAPI_KEY or check rate limits.")
-        else:
-            news_data = [
-                {
-                    "time": "2 min ago",
-                    "headline": "Fed signals potential rate cuts in Q3 amid cooling inflation",
-                    "source": "Reuters",
-                    "url": "https://www.reuters.com/markets/us/fed-signals-potential-rate-cuts-2024-04-12/",
-                    "ticker": "SPY",
-                    "sentiment": "positive",
-                    "score": 0.78,
-                    "impact": "High"
-                },
-                {
-                    "time": "15 min ago",
-                    "headline": "AAPL reports stronger-than-expected Q4 iPhone sales in China",
-                    "source": "Bloomberg",
-                    "url": "https://www.bloomberg.com/news/articles/2024-04-12/apple-iphone-sales-china-beat-estimates",
-                    "ticker": "AAPL",
-                    "sentiment": "positive",
-                    "score": 0.85,
-                    "impact": "High"
-                },
-            ]
-            for news in news_data:
-                sentiment_color = "🟢" if news["sentiment"] == "positive" else "🔴" if news["sentiment"] == "negative" else "🟡"
-                score_display = f"{news['score']:+.2f}"
-                border_color = "green" if news["sentiment"] == "positive" else "red" if news["sentiment"] == "negative" else "orange"
-                headline_html = f"<a href='{news['url']}' target='_blank' style='font-weight: 500; color: inherit; text-decoration: none;'>🔗 {news['headline']}</a>"
-                st.markdown(f"""
-                <div style="padding: 10px; border-left: 4px solid {border_color}; margin-bottom: 10px; background: rgba(0,0,0,0.02); border-radius: 4px;">
-                    <div style="font-size: 12px; color: gray;">{news['time']} • {news['source']} • {news['ticker']}</div>
-                    {headline_html}
-                    <div style="font-size: 12px;">{sentiment_color} Sentiment: <b>{score_display}</b> • Impact: {news['impact']}</div>
-                </div>
-                """, unsafe_allow_html=True)
+        st.info("Awaiting live news data.")
 
 with news_col2:
     st.subheader("Sentiment Distribution")
     
-    # Sentiment pie chart
-    sentiment_counts = pd.DataFrame({
-        "Sentiment": ["Positive", "Neutral", "Negative"],
-        "Count": [45, 23, 32],
-        "Avg Score": [0.68, 0.05, -0.54]
-    })
-    
-    fig_sentiment = px.pie(
-        sentiment_counts,
-        values="Count",
-        names="Sentiment",
-        color="Sentiment",
-        color_discrete_map={"Positive": "#2ecc71", "Neutral": "#f1c40f", "Negative": "#e74c3c"}
-    )
-    fig_sentiment.update_layout(height=250, showlegend=True)
-    st.plotly_chart(fig_sentiment, use_container_width=True)
-    
-    st.markdown("---")
-    
-    st.subheader("Top Mentioned Tickers")
-    
-    ticker_mentions = pd.DataFrame({
-        "Ticker": ["AAPL", "TSLA", "NVDA", "MSFT", "AMZN", "GOOGL", "META", "JPM"],
-        "Mentions": [234, 198, 187, 156, 134, 123, 112, 98],
-        "Avg Sentiment": [0.42, -0.15, 0.28, 0.65, 0.18, 0.31, -0.08, 0.22]
-    })
-    
-    fig_mentions = px.bar(
-        ticker_mentions,
-        x="Mentions",
-        y="Ticker",
-        color="Avg Sentiment",
-        color_continuous_scale="RdBu",
-        range_color=[-1, 1],
-        orientation='h'
-    )
-    fig_mentions.update_layout(height=250, yaxis=dict(autorange="reversed"))
-    st.plotly_chart(fig_mentions, use_container_width=True)
+    if live_news and len(live_news) > 0:
+        sentiments = [n.get('sentiment', 'neutral') for n in live_news]
+        sentiment_counts = pd.DataFrame(pd.Series(sentiments).value_counts()).reset_index()
+        sentiment_counts.columns = ["Sentiment", "Count"]
+        
+        fig_sentiment = px.pie(
+            sentiment_counts,
+            values="Count",
+            names="Sentiment",
+            color="Sentiment",
+            color_discrete_map={"positive": "#2ecc71", "neutral": "#f1c40f", "negative": "#e74c3c"}
+        )
+        fig_sentiment.update_layout(height=250, showlegend=True)
+        st.plotly_chart(fig_sentiment, use_container_width=True)
+        
+        st.markdown("---")
+        st.subheader("Top Mentioned Tickers")
+        
+        tickers = [n.get('ticker') for n in live_news if n.get('ticker')]
+        if tickers:
+            ticker_mentions = pd.DataFrame(pd.Series(tickers).value_counts().head(8)).reset_index()
+            ticker_mentions.columns = ["Ticker", "Mentions"]
+            
+            fig_mentions = px.bar(
+                ticker_mentions, x="Mentions", y="Ticker", orientation='h'
+            )
+            fig_mentions.update_layout(height=250, yaxis=dict(autorange="reversed"))
+            st.plotly_chart(fig_mentions, use_container_width=True)
+    else:
+        st.info("Awaiting live news data to compute sentiment.")
 
 st.divider()
 
 # Row 8: Macro Regime State Machine
 st.header("🌍 Macro Regime Detection")
 
-macro_cols = st.columns(4)
-
-with macro_cols[0]:
-    st.metric("VIX Level", "18.4", "-2.1", delta_color="normal")
-    st.progress(0.46, text="Low Volatility Regime")
-
-with macro_cols[1]:
-    st.metric("10Y-2Y Spread", "-0.45%", "+0.08%", delta_color="inverse")
-    st.progress(0.15, text="Inverted (Recession Risk)")
-
-with macro_cols[2]:
-    st.metric("DXY Index", "104.2", "+0.3%")
-    st.progress(0.65, text="Strong Dollar")
-
-with macro_cols[3]:
-    st.metric("Current Regime", "Risk-On Growth", "↗️ Improving")
-    st.info("🟢 Favorable for Equities")
-
-st.markdown("---")
-
-# Regime transitions
-regime_col1, regime_col2 = st.columns([1, 1])
-
-with regime_col1:
-    st.subheader("Regime State Machine")
+if live_risk and 'regime' in live_risk:
+    regime_data = live_risk['regime']
+    regime_name = regime_data.get('regime', 'neutral').replace('_', ' ').title()
+    equity_bias = regime_data.get('equity_bias', 0.0)
     
-    # Regime transition matrix
-    regime_matrix = np.array([
-        [0.85, 0.10, 0.03, 0.02],  # Risk-On
-        [0.15, 0.75, 0.08, 0.02],  # Risk-Off
-        [0.05, 0.12, 0.78, 0.05],  # Stagflation
-        [0.08, 0.08, 0.10, 0.74]   # Recovery
-    ])
-    
-    fig_regime = px.imshow(
-        regime_matrix,
-        labels=dict(x="To Regime", y="From Regime", color="Probability"),
-        x=["Risk-On", "Risk-Off", "Stagflation", "Recovery"],
-        y=["Risk-On", "Risk-Off", "Stagflation", "Recovery"],
-        color_continuous_scale="Blues",
-        range_color=[0, 1]
-    )
-    fig_regime.update_layout(height=350)
-    st.plotly_chart(fig_regime, use_container_width=True)
-
-with regime_col2:
-    st.subheader("Factor Performance by Regime")
-    
-    factor_regime = pd.DataFrame({
-        "Factor": ["Momentum", "Value", "Quality", "Growth", "Low Vol"],
-        "Risk-On": [2.4, 1.8, 1.2, 3.1, 0.8],
-        "Risk-Off": [-1.2, 0.5, 2.1, -2.8, 1.9],
-        "Stagflation": [0.8, 2.4, 1.5, -0.5, 1.2],
-        "Recovery": [1.9, 3.2, 1.8, 2.5, 0.9]
-    })
-    
-    fig_factor_regime = px.imshow(
-        factor_regime.set_index("Factor"),
-        labels=dict(x="Regime", y="Factor", color="IR"),
-        color_continuous_scale="RdYlGn",
-        range_color=[-3, 4]
-    )
-    fig_factor_regime.update_layout(height=350)
-    st.plotly_chart(fig_factor_regime, use_container_width=True)
-
-st.divider()
-
-# Row 9: Alpha Decay Monitoring
-st.header("⏱️ Alpha Decay & Signal Lifespan")
-
-alpha_col1, alpha_col2, alpha_col3 = st.columns([1, 1, 1])
-
-with alpha_col1:
-    st.subheader("IC Decay Curves")
-    
-    horizons = list(range(1, 31))
-    kronos_decay = [0.082 * np.exp(-0.05 * h) + 0.01 for h in horizons]
-    finbert_decay = [0.045 * np.exp(-0.03 * h) + 0.005 for h in horizons]
-    macro_decay = [0.031 * np.exp(-0.02 * h) + 0.008 for h in horizons]
-    
-    fig_decay = go.Figure()
-    fig_decay.add_trace(go.Scatter(x=horizons, y=kronos_decay, name="Kronos", mode='lines'))
-    fig_decay.add_trace(go.Scatter(x=horizons, y=finbert_decay, name="FinBERT", mode='lines'))
-    fig_decay.add_trace(go.Scatter(x=horizons, y=macro_decay, name="Macro", mode='lines'))
-    fig_decay.add_hline(y=0.02, line_dash="dash", line_color="red", annotation_text="Significance")
-    fig_decay.update_layout(
-        xaxis_title="Days",
-        yaxis_title="IC",
-        height=300,
-        template='plotly_white'
-    )
-    st.plotly_chart(fig_decay, use_container_width=True)
-
-with alpha_col2:
-    st.subheader("Half-Life by Signal")
-    
-    half_life_data = pd.DataFrame({
-        "Signal": ["Kronos", "FinBERT", "Macro", "Value", "Momentum"],
-        "Half-Life (days)": [8.5, 15.2, 22.1, 45.3, 5.8],
-        "Signal Type": ["ML", "NLP", "Macro", "Fundamental", "Technical"]
-    })
-    
-    fig_halflife = px.bar(
-        half_life_data,
-        x="Signal",
-        y="Half-Life (days)",
-        color="Signal Type",
-        color_discrete_sequence=px.colors.qualitative.Set2
-    )
-    fig_halflife.update_layout(height=300)
-    st.plotly_chart(fig_halflife, use_container_width=True)
-
-with alpha_col3:
-    st.subheader("Decay Alerts")
-    
-    alerts = [
-        {"signal": "Kronos", "status": "⚠️", "ic_5d": 0.054, "threshold": 0.05, "action": "Reduce weight"},
-        {"signal": "FinBERT", "status": "✅", "ic_5d": 0.038, "threshold": 0.03, "action": "Maintain"},
-        {"signal": "Macro", "status": "✅", "ic_5d": 0.027, "threshold": 0.02, "action": "Maintain"},
-        {"signal": "Value", "status": "🔴", "ic_5d": 0.012, "threshold": 0.02, "action": "Consider removal"}
-    ]
-    
-    for alert in alerts:
-        color = "orange" if alert["status"] == "⚠️" else "green" if alert["status"] == "✅" else "red"
-        st.markdown(f"""
-        <div style="padding: 8px; border-left: 4px solid {color}; margin-bottom: 8px; background: rgba(0,0,0,0.02);">
-            <b>{alert['signal']}</b> {alert['status']}<br>
-            <small>IC(5D): {alert['ic_5d']:.3f} | Threshold: {alert['threshold']:.3f}</small><br>
-            <small><i>{alert['action']}</i></small>
-        </div>
-        """, unsafe_allow_html=True)
-
-st.divider()
-
-# Row 10: Kelly Criterion Position Sizing
-st.header("🎰 Kelly Criterion Sizing")
-
-kelly_col1, kelly_col2 = st.columns([2, 1])
-
-with kelly_col1:
-    st.subheader("Optimal Position Sizes")
-    
-    kelly_data = pd.DataFrame({
-        "Ticker": ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "JPM"],
-        "Expected Edge": [0.12, 0.15, 0.08, 0.06, 0.22, 0.09, 0.18, 0.07],
-        "Win Rate": [0.58, 0.62, 0.54, 0.52, 0.65, 0.55, 0.48, 0.53],
-        "Kelly %": [8.5, 11.2, 5.4, 3.8, 18.5, 6.2, 14.2, 4.5],
-        "Half-Kelly %": [4.25, 5.6, 2.7, 1.9, 9.25, 3.1, 7.1, 2.25],
-        "Current %": [8.5, 7.2, 6.8, 5.4, 9.1, 4.2, -3.5, 5.8]
-    })
-    
-    fig_kelly = go.Figure()
-    
-    # Kelly optimal
-    fig_kelly.add_trace(go.Bar(
-        name="Kelly Optimal",
-        x=kelly_data["Ticker"],
-        y=kelly_data["Kelly %"],
-        marker_color='rgba(102, 126, 234, 0.6)'
-    ))
-    
-    # Half-Kelly (conservative)
-    fig_kelly.add_trace(go.Bar(
-        name="Half-Kelly",
-        x=kelly_data["Ticker"],
-        y=kelly_data["Half-Kelly %"],
-        marker_color='rgba(118, 75, 162, 0.6)'
-    ))
-    
-    # Current positions
-    fig_kelly.add_trace(go.Scatter(
-        name="Current Position",
-        x=kelly_data["Ticker"],
-        y=kelly_data["Current %"],
-        mode='markers',
-        marker=dict(size=15, color='red', symbol='diamond')
-    ))
-    
-    fig_kelly.update_layout(
-        barmode='group',
-        height=350,
-        yaxis_title="Portfolio Weight (%)",
-        template='plotly_white'
-    )
-    
-    st.plotly_chart(fig_kelly, use_container_width=True)
-
-with kelly_col2:
-    st.subheader("Kelly Formula")
-    
-    st.latex(r'''
-    f^* = \frac{p(b+1) - 1}{b}
-    ''')
-    
-    st.markdown("""
-    Where:
-    - $f^*$ = Optimal fraction of portfolio
-    - $p$ = Probability of win
-    - $b$ = Win/loss ratio
-    
-    **Applied constraints:**
-    - Max position: 15%
-    - Min position: -10% (short)
-    - Half-Kelly for safety
-    """)
-    
-    st.markdown("---")
-    
-    st.metric("Portfolio Kelly Fraction", "0.52", "Conservative")
-    st.metric("Expected CAGR", "24.5%", "vs 15% buy-hold")
-    st.metric("Risk of Ruin", "<0.1%", "at half-Kelly")
+    r_col1, r_col2 = st.columns(2)
+    with r_col1:
+        st.metric("Current Regime", regime_name)
+    with r_col2:
+        st.metric("Equity Bias", f"{equity_bias:+.2f}")
+else:
+    st.info("Awaiting live risk data.")
 
 st.divider()
 
@@ -1129,54 +689,22 @@ st.divider()
 st.header("🔴 Live Pipeline Monitor")
 
 # Auto-refresh control
-auto_refresh = st.toggle("Enable Auto-Refresh (30s)", value=False)
-if auto_refresh:
+auto_refresh_monitor = st.toggle("Enable Auto-Refresh (30s)", value=False, key="monitor_refresh")
+if auto_refresh_monitor:
     st.markdown('<meta http-equiv="refresh" content="30">', unsafe_allow_html=True)
 
-status_cols = st.columns(6)
-
-with status_cols[0]:
-    st.success("✅ Data Ingestion")
-    st.caption("Last: 2 min ago\n374 tickers")
-
-with status_cols[1]:
-    st.success("✅ Kronos Alpha")
-    st.caption("GPU: RTX 3060\n47.2ms/ticker")
-
-with status_cols[2]:
-    st.warning("⚠️ FinBERT")
-    st.caption("Fallback mode\nUsing mock sentiment")
-
-with status_cols[3]:
-    st.success("✅ Macro Regime")
-    st.caption("Risk-On\nVIX: 18.4")
-
-with status_cols[4]:
-    st.success("✅ Portfolio Opt")
-    st.caption("CVXPY solved\n47 positions")
-
-with status_cols[5]:
-    st.success("✅ Risk Check")
-    st.caption("VaR: 2.34%\nPass")
-
-st.markdown("---")
-
 # Pipeline logs
-with st.expander("📋 Pipeline Execution Logs"):
-    logs = """
-    [2026-04-12 13:45:02] INFO: Starting Kronos pipeline execution
-    [2026-04-12 13:45:05] INFO: Loaded 374 tickers from S&P 500 universe
-    [2026-04-12 13:45:12] INFO: KronosAlphaGenerator initialized on cuda:0
-    [2026-04-12 13:45:45] INFO: Batch inference complete: 374 tickers in 32.4s
-    [2026-04-12 13:46:01] WARNING: FinBERT sentiment unavailable, using mock fallback
-    [2026-04-12 13:46:03] INFO: MacroRegimeDetector: Current regime = RISK_ON_GROWTH
-    [2026-04-12 13:46:05] INFO: AdaptiveEnsemble: Kronos=50% | FinBERT=30% | Macro=20%
-    [2026-04-12 13:46:12] INFO: Portfolio optimization converged: 47 positions
-    [2026-04-12 13:46:15] INFO: Risk check passed: VaR=2.34% < limit=5.00%
-    [2026-04-12 13:46:18] INFO: TCA analysis: Avg impact = 18.5bps
-    [2026-04-12 13:46:20] INFO: Pipeline execution complete: 78.2s total
-    """
-    st.code(logs, language='log')
+with st.expander("📋 Pipeline Execution Logs", expanded=True):
+    log_path = ROOT_DIR / "logs/production.log"
+    if log_path.exists():
+        try:
+            with open(log_path, 'r') as f:
+                logs_tail = f.read().splitlines()[-30:]
+                st.code("\n".join(logs_tail), language='log')
+        except Exception as e:
+            st.error(f"Could not read logs: {e}")
+    else:
+        st.info("No production logs found.")
 
 st.divider()
 

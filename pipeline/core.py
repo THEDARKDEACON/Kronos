@@ -71,7 +71,7 @@ def run_pipeline(
     if verbose:
         print("=== Kronos Pipeline ===\n")
 
-    universe = get_universe()
+    universe = get_universe(as_of_date=as_of_date)
     if verbose:
         print(f"1. Universe: {len(universe)} tickers")
 
@@ -87,8 +87,22 @@ def run_pipeline(
     )
     if not ohlcv_dict:
         raise RuntimeError("No OHLCV data fetched — cannot run pipeline")
+    
+    # === HIGH PERFORMANCE UPGRADE: CORPORATE ACTIONS ===
     if verbose:
-        print(f"3. OHLCV loaded: {len(ohlcv_dict)} tickers")
+        print(f"3. OHLCV loaded: {len(ohlcv_dict)} tickers. Applying Corporate Actions...")
+    try:
+        from data.corporate_actions import adjust_universe_prices
+        from datetime import datetime, timedelta
+        target_ts = pd.Timestamp(as_of_date).to_pydatetime() if as_of_date else datetime.now()
+        start_ts = target_ts - timedelta(days=lookback_days)
+        
+        ohlcv_dict = adjust_universe_prices(ohlcv_dict, start_ts, target_ts)
+        if verbose:
+            print("   Corporate Actions (Splits/Dividends) applied successfully.")
+    except Exception as e:
+        if verbose:
+            print(f"   [WARNING] Failed to apply corporate actions: {e}")
 
     # Settle any pending IC predictions before generating new ones
     if IC_TRACKER_AVAILABLE:

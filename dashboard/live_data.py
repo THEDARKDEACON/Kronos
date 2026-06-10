@@ -226,44 +226,25 @@ def compute_drift(
 
 
 def load_live_news(tickers=None, max_articles=10) -> List[Dict]:
+    """
+    C-6 Fix: Passive reading from cache.
+    The dashboard must never run ML inference on the UI thread.
+    The background pipeline should write `latest_news.json` to the cache.
+    """
     try:
-        from signals.finbert_sentiment import NewsSentimentFetcher
-
-        fetcher = NewsSentimentFetcher()
-        all_news = []
-
+        path = CACHE_DIR / "latest_news.json"
+        if not path.exists():
+            return []
+            
+        with open(path, "r") as f:
+            all_news = json.load(f)
+            
         if tickers:
-            for ticker in tickers[:5]:
-                articles = fetcher.fetch_news_headlines(ticker, days=3)
-                for article in articles[:3]:
-                    sentiment_score, _ = fetcher.analyzer.analyze_text(article["title"])
-                    all_news.append(_format_news_article(article, ticker, sentiment_score))
-        else:
-            articles = fetcher.fetch_news_headlines("SPY", days=2)
-            for article in articles[:max_articles]:
-                sentiment_score, _ = fetcher.analyzer.analyze_text(article["title"])
-                all_news.append(_format_news_article(article, "MARKET", sentiment_score))
-
+            all_news = [n for n in all_news if n.get("ticker") in tickers]
+            
         return all_news[:max_articles]
     except Exception:
         return []
-
-
-def _format_news_article(article: Dict, ticker: str, sentiment_score: float) -> Dict:
-    return {
-        "time": article.get("published_at", "Recent"),
-        "headline": article["title"],
-        "source": article.get("source", "News"),
-        "url": article.get("url", ""),
-        "ticker": ticker,
-        "sentiment": (
-            "positive" if sentiment_score > 0.2
-            else "negative" if sentiment_score < -0.2
-            else "neutral"
-        ),
-        "score": sentiment_score,
-        "impact": "High" if abs(sentiment_score) > 0.5 else "Medium",
-    }
 
 
 def load_live_dashboard_state() -> LiveDashboardState:

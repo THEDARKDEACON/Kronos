@@ -83,6 +83,9 @@ class ExperimentTracker:
             mlflow.set_experiment(experiment_name)
             print(f"[Experiment] MLflow tracking enabled: {experiment_name}")
         else:
+            if tracking_uri:
+                # M-16 Fix: Explicit MLflow config but library missing
+                raise RuntimeError("tracking_uri was provided, but mlflow is not installed.")
             print(f"[Experiment] Using local tracking: {local_dir}")
         
         self.current_run_id: Optional[str] = None

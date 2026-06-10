@@ -7,19 +7,61 @@ import os
 from typing import List, Dict, Optional
 from datetime import datetime
 
-CACHE_DIR = "cache"
+CACHE_DIR = "data/cache"
 
-def get_universe() -> pd.DataFrame:
-    """Scrapes the real S&P 500 constituents from Wikipedia."""
-    # We don't cache the universe mapping itself since it's an instant Wikipedia fetch
-    print("Scraping real S&P 500 universe from Wikipedia...")
-    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+def get_universe(as_of_date: Optional[str] = None) -> pd.DataFrame:
+    """Fetch S&P 500 constituents from Wikipedia with daily caching.
+
+    Enforces strict Point-In-Time (PIT) validation if as_of_date is provided.
+    """
     import io
-    html = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}).text
-    tables = pd.read_html(io.StringIO(html))
-    df = tables[0][['Symbol', 'GICS Sector']].rename(columns={'Symbol': 'Ticker', 'GICS Sector': 'Sector'})
-    df['Ticker'] = df['Ticker'].str.replace('.', '-', regex=False)
-    return df
+    from datetime import date as _date
+
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    
+    target_date = pd.Timestamp(as_of_date).date() if as_of_date else _date.today()
+    cache_file = os.path.join(CACHE_DIR, f"sp500_universe_{target_date}.parquet")
+
+    if os.path.exists(cache_file):
+        print(f"Loading S&P 500 universe from cache for {target_date}...")
+        return pd.read_parquet(cache_file)
+        
+    if as_of_date:
+        raise ValueError(
+            f"DataProvenanceError: Strict PIT enforcement failed. "
+            f"Missing historical universe cache for {target_date}. "
+            f"Refusing to fall back to future universe to prevent survivorship bias."
+        )
+
+    print("Scraping S&P 500 universe from Wikipedia...")
+    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+    try:
+        resp = requests.get(
+            url,
+            headers={'User-Agent': 'KronosQuant/1.0 (research)'},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        tables = pd.read_html(io.StringIO(resp.text))
+        df = tables[0][['Symbol', 'GICS Sector']].rename(
+            columns={'Symbol': 'Ticker', 'GICS Sector': 'Sector'}
+        )
+        df['Ticker'] = df['Ticker'].str.replace('.', '-', regex=False)
+        df.to_parquet(cache_file)
+        print(f"Universe cached: {len(df)} tickers")
+        return df
+    except Exception as exc:
+        # Graceful fallback: use the most recently cached universe file
+        candidates = sorted(
+            [f for f in os.listdir(CACHE_DIR) if f.startswith('sp500_universe_')]
+        )
+        if candidates:
+            fallback = os.path.join(CACHE_DIR, candidates[-1])
+            print(f"[WARNING] Wikipedia scrape failed ({exc}). Using cached universe: {candidates[-1]}")
+            return pd.read_parquet(fallback)
+        raise RuntimeError(
+            f"Cannot fetch S&P 500 universe and no cache available: {exc}"
+        ) from exc
 
 def fetch_pit_fundamental(ticker: str, sector: str, as_of_date: pd.Timestamp) -> dict:
     allowed_date = as_of_date - pd.Timedelta(days=90)
@@ -93,7 +135,8 @@ def get_historical_ohlcv(tickers: List[str], as_of_date: Optional[str] = None, l
         return {}
         
     target_ts = pd.Timestamp(as_of_date) if as_of_date else pd.Timestamp.now()
-    cache_file = os.path.join(CACHE_DIR, f"ohlcv_{target_ts.date()}.parquet")
+    # M-11: include ticker count in key so a changed universe invalidates the cache
+    cache_file = os.path.join(CACHE_DIR, f"ohlcv_{target_ts.date()}_{len(tickers)}t.parquet")
     
     # Try to load from cache first
     if os.path.exists(cache_file):

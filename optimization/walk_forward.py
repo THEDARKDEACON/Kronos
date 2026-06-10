@@ -62,27 +62,30 @@ class WalkForwardOptimizer:
         Returns list of (train_start, train_end, test_start, test_end) tuples.
         """
         windows = []
-        current = start_date
-        
+        # In anchored mode the first test starts at start_date + train_size;
+        # in rolling mode current tracks the start of each train window.
+        current = start_date + timedelta(days=self.config.train_size) if self.config.anchored else start_date
+
         while True:
             if self.config.anchored:
-                # Anchored: training window grows from start
+                # Anchored: training window always begins at start_date and
+                # grows to 'current' (the test boundary).
                 train_start = start_date
-                train_end = current + timedelta(days=self.config.train_size)
+                train_end = current
             else:
-                # Rolling: fixed-size training window
+                # Rolling: fixed-size training window slides forward
                 train_start = current
                 train_end = current + timedelta(days=self.config.train_size)
-            
+
             test_start = train_end
             test_end = test_start + timedelta(days=self.config.test_size)
-            
+
             if test_end > end_date:
                 break
-            
+
             windows.append((train_start, train_end, test_start, test_end))
             current += timedelta(days=self.config.step_size)
-        
+
         return windows
     
     def optimize(self, 

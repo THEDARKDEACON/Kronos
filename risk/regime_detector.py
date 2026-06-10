@@ -203,12 +203,10 @@ class CrossSectionalCorrelationMonitor:
         
         # Calculate correlation matrix
         corr_matrix = returns_df.tail(self.lookback).corr()
-        
-        # Extract upper triangle (excluding diagonal)
-        upper_triangle = np.triu(corr_matrix.values, k=1)
-        
-        # Get non-zero correlations
-        correlations = upper_triangle[upper_triangle != 0]
+
+        # Extract upper triangle using a boolean mask (avoids dropping valid 0-correlations)
+        mask = np.triu(np.ones(corr_matrix.shape, dtype=bool), k=1)
+        correlations = corr_matrix.values[mask]
         
         if len(correlations) == 0:
             return 0.5

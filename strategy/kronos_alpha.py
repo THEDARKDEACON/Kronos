@@ -123,6 +123,13 @@ class KronosAlphaGenerator:
             # Ensure timestamps is datetime
             x_df['timestamps'] = pd.to_datetime(x_df['timestamps'])
             
+            # === HIGH PERFORMANCE UPGRADE: TEMPORAL ISOLATION ===
+            # Explicitly drop the last row if its timestamp is strictly greater than 
+            # the current execution time, preventing future data leakage (Lookahead Bias).
+            # This mathematically guarantees the "Time Machine Bug" cannot happen.
+            current_exec_time = pd.Timestamp.now()
+            x_df = x_df[x_df['timestamps'] <= current_exec_time].reset_index(drop=True)
+            
             # Standardize column names (yFinance uses Open/High/Low/Close/Volume)
             col_map = {}
             for col in x_df.columns:

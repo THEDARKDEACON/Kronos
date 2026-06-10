@@ -341,39 +341,47 @@ class FactorNeutralOptimizer:
     def __init__(self, risk_model: FactorRiskModel):
         self.risk_model = risk_model
     
-    def neutralize_factor(self, portfolio_weights: Dict[str, FactorExposure],
+    def neutralize_factor(self, portfolio_weights: Dict[str, float],
+                         portfolio_exposures: Dict[str, 'FactorExposure'],
                          target_factor: str = 'market_beta',
                          max_deviation: float = 0.1) -> Dict[str, float]:
         """
         Adjust portfolio weights to achieve factor neutrality.
-        
-        This is a simplified implementation - in production, this would be
-        integrated directly into the CVXPY optimization.
+
+        Args:
+            portfolio_weights:   symbol -> weight (float)
+            portfolio_exposures: symbol -> FactorExposure (pre-computed)
+            target_factor:       attribute name on FactorExposure to neutralize
+            max_deviation:       tolerance; skip adjustment if already within bounds
+
+        This is a simplified proportional implementation — in production this
+        should be integrated directly into the CVXPY optimization as a linear
+        equality/inequality constraint.
         """
-        # Calculate current exposure
         current_exp = self.risk_model.calculate_portfolio_factor_exposure(
-            portfolio_weights, portfolio_weights  # Pass weights as proxy for exposures
+            portfolio_weights, portfolio_exposures
         )
-        
+
         target_exposure = getattr(current_exp, target_factor, 0.0)
-        
+
         if abs(target_exposure) <= max_deviation:
             return portfolio_weights  # Already neutral
-        
+
         # Simple proportional adjustment (in production, use proper optimization)
         adjusted_weights = {}
         for symbol, weight in portfolio_weights.items():
-            if symbol in portfolio_weights:
-                exp = portfolio_weights[symbol]
+            if symbol in portfolio_exposures:
+                exp = portfolio_exposures[symbol]
                 factor_loading = getattr(exp, target_factor, 0.0)
-                
                 # Reduce weights in same direction as exposure
                 adjustment = 1.0 - (target_exposure * factor_loading * 0.1)
                 adjusted_weights[symbol] = weight * adjustment
-        
+            else:
+                adjusted_weights[symbol] = weight  # No exposure data — keep as-is
+
         # Renormalize
         total = sum(abs(w) for w in adjusted_weights.values())
         if total > 0:
             adjusted_weights = {k: v / total for k, v in adjusted_weights.items()}
-        
+
         return adjusted_weights

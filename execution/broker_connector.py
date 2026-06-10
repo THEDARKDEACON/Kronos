@@ -162,7 +162,7 @@ class AlpacaBroker(BrokerInterface):
                 avg_entry_price=float(pos.avg_entry_price),
                 current_price=float(pos.current_price),
                 unrealized_pnl=float(pos.unrealized_pl),
-                realized_pnl=float(pos.realized_pl)
+                realized_pnl=float(getattr(pos, 'realized_pl', 0.0))
             )
         return positions
     
@@ -304,10 +304,10 @@ class InteractiveBrokersConnector(BrokerInterface):
         return True, order.id
     
     def cancel_order(self, order_id: str) -> bool:
-        if not self.ib or not self.ib.isConnected():
-            return False
-        # Requires order object - simplified implementation
-        return False
+        raise NotImplementedError(
+            "IBKR cancel_order is not implemented. Track the Trade object "
+            "returned by placeOrder() and call ib.cancelOrder(trade.order) directly."
+        )
     
     def get_order_status(self, order_id: str) -> Dict:
         if not self.ib or not self.ib.isConnected():
@@ -331,6 +331,12 @@ class ExecutionEngine:
         self.broker = broker
         self.transaction_cost = transaction_cost_bps / 10000.0
         self.execution_history = []
+        try:
+            from execution.algorithmic_execution import ExecutionManagementSystem
+            self.ems = ExecutionManagementSystem(self.broker)
+            self.ems.start()
+        except ImportError:
+            self.ems = None
         
     def rebalance_portfolio(self, target_weights: Dict[str, float], 
                            sector_map: Dict[str, str] = None,
@@ -393,6 +399,7 @@ class ExecutionEngine:
 
         # Calculate required trades
         trades = []
+        trade_prices: Dict[str, float] = {}  # symbol -> price used for share sizing (C-3)
         for symbol in all_symbols:
             target = target_weights.get(symbol, 0)
             current = current_weights.get(symbol, 0)
@@ -400,23 +407,23 @@ class ExecutionEngine:
 
             if abs(delta) > 0.001:  # 10 bps minimum trade threshold
                 trade_value = delta * total_equity
-                current_price = live_prices.get(symbol, 100.0)
-                if current_price <= 0:
-                    current_price = 100.0
-                if current_price == 100.0 and symbol not in live_prices:
-                    print(f"   [Execution] WARNING: Using fallback $100 price for {symbol} — fetch failed")
+                current_price = live_prices.get(symbol)  # C-2: no fallback
+                if not current_price or current_price <= 0:
+                    print(f"   [Execution] SKIPPING {symbol}: no reliable price (fetch failed)")
+                    continue
                 shares = int(trade_value / current_price)
-                
+
                 if shares != 0:
                     side = OrderSide.BUY if shares > 0 else OrderSide.SELL
                     order_type = OrderType.VWAP if use_vwap else OrderType.MARKET
-                    
+
                     trades.append(Order(
                         symbol=symbol,
                         side=side,
                         quantity=abs(shares),
                         order_type=order_type
                     ))
+                    trade_prices[symbol] = current_price  # C-3: record for cost accounting
         
         # Execute trades
         executed = []
@@ -425,10 +432,26 @@ class ExecutionEngine:
         total_cost = 0.0
         
         for order in trades:
-            success, order_id = self.broker.place_order(order)
+            success = False
+            order_id = None
+            
+            if use_vwap and self.ems:
+                self.ems.submit_twap_order(
+                    symbol=order.symbol,
+                    quantity=order.quantity,
+                    side=order.side,
+                    duration_minutes=60,
+                    num_buckets=10
+                )
+                # Assume success for EMS submission
+                success = True
+                order_id = "EMS_PENDING"
+            else:
+                success, order_id = self.broker.place_order(order)
+                
             if success:
                 executed.append(order)
-                trade_value = order.quantity * 100
+                trade_value = order.quantity * trade_prices.get(order.symbol, 0.0)  # C-3: use actual price
                 cost = trade_value * self.transaction_cost
                 total_cost += cost
                 
@@ -471,16 +494,21 @@ class ExecutionEngine:
                           num_buckets: int = 10,
                           duration_minutes: int = 60) -> Tuple[bool, List[str]]:
         """
-        Execute a VWAP (Volume Weighted Average Price) order.
-        
-        Splits a large order into smaller chunks executed over time
-        to minimize market impact.
-        
+        Execute a time-sliced order to reduce market impact.
+
+        NOTE: This is a TWAP-style implementation (equal time buckets), NOT true
+        VWAP. True VWAP requires real-time volume data to size each bucket
+        proportionally to historical intraday volume. Rename/upgrade if live
+        volume participation tracking is added.
+
+        Splits a large order into IOC limit-order chunks executed at fixed
+        intervals to reduce market impact.
+
         Args:
             order: The order to execute
             num_buckets: Number of time buckets to split order into
             duration_minutes: Total duration for execution
-        
+
         Returns:
             (success, list_of_order_ids)
         """
@@ -524,8 +552,7 @@ class ExecutionEngine:
             
             # Wait between buckets
             if i < len(chunks) - 1:
-                import time
-                time.sleep(interval_seconds)
+                time.sleep(interval_seconds)  # L-2: removed redundant inner import
         
         success = len(order_ids) == len(chunks)
         return success, order_ids
@@ -555,26 +582,60 @@ class ExecutionEngine:
         )
     
     def emergency_liquidate(self, timeout_seconds: int = 60) -> bool:
-        """Emergency close all positions at market."""
+        """Emergency close all positions at market.
+
+        Args:
+            timeout_seconds: Hard wall-clock deadline; positions not submitted
+                             before this limit are skipped with a warning.
+
+        Returns:
+            True only if every position was submitted successfully.
+        """
         print("[🚨 EMERGENCY LIQUIDATION INITIATED]")
+
+        # Verify broker is reachable before firing orders
+        if not self.broker.connect():
+            print("[🚨 LIQUIDATION ABORTED] Broker connection failed")
+            return False
+
         positions = self.broker.get_positions()
-        
+        if not positions:
+            print("[🚨 LIQUIDATION] No open positions found")
+            return True
+
+        succeeded: List[str] = []
+        failed: List[str] = []
+        deadline = time.time() + timeout_seconds
+
         for symbol, pos in positions.items():
-            if pos.quantity != 0:
-                side = OrderSide.SELL if pos.quantity > 0 else OrderSide.BUY
-                order = Order(
-                    symbol=symbol,
-                    side=side,
-                    quantity=abs(int(pos.quantity)),
-                    order_type=OrderType.MARKET,
-                    time_in_force='ioc'  # Immediate or cancel
-                )
-                success, _ = self.broker.place_order(order)
-                if success:
-                    print(f"   [Liquidate] {symbol}: {pos.quantity} shares")
-        
-        print("[🚨 LIQUIDATION COMPLETE]")
-        return True
+            if time.time() > deadline:
+                remaining = len(positions) - len(succeeded) - len(failed)
+                print(f"[🚨 LIQUIDATION TIMEOUT] {remaining} position(s) not submitted")
+                break
+
+            if pos.quantity == 0:
+                continue
+
+            side = OrderSide.SELL if pos.quantity > 0 else OrderSide.BUY
+            order = Order(
+                symbol=symbol,
+                side=side,
+                quantity=abs(int(pos.quantity)),
+                order_type=OrderType.MARKET,
+                time_in_force='ioc',
+            )
+            success, order_id = self.broker.place_order(order)
+            if success:
+                succeeded.append(symbol)
+                print(f"   [Liquidate] ✓ {symbol}: {pos.quantity} shares → order {order_id}")
+            else:
+                failed.append(symbol)
+                print(f"   [Liquidate] ✗ {symbol}: ORDER FAILED")
+
+        print(f"[🚨 LIQUIDATION COMPLETE] Succeeded: {len(succeeded)}, Failed: {len(failed)}")
+        if failed:
+            print(f"   Failed positions: {failed}")
+        return len(failed) == 0
 
 
 # Convenience factory
@@ -582,7 +643,88 @@ def create_broker(broker_type: str = 'alpaca', **kwargs) -> BrokerInterface:
     """Factory function to create broker instances."""
     if broker_type.lower() == 'alpaca':
         return AlpacaBroker(**kwargs)
+    elif broker_type.lower() == 'alpaca_fix':
+        return AlpacaFixBroker(**kwargs)
     elif broker_type.lower() == 'ibkr':
         return InteractiveBrokersConnector(**kwargs)
     else:
         raise ValueError(f"Unknown broker type: {broker_type}")
+
+import threading
+import sys
+
+class AlpacaFixBroker(AlpacaBroker):
+    """
+    FIX-enabled Alpaca Broker.
+    Uses REST for get_account and get_positions (since FIX is only for order routing),
+    but uses the QuickFIX engine for place_order and execution reports.
+    """
+    def __init__(self, api_key: str = None, secret_key: str = None, 
+                 paper: bool = True, fix_config_path: str = "config/alpaca_fix.cfg"):
+        super().__init__(api_key, secret_key, paper, rate_limit_per_second=200)
+        self.fix_config_path = fix_config_path
+        self.fix_engine = None
+        self.initiator = None
+        self._fix_thread = None
+        self.fix_password = os.getenv('ALPACA_FIX_PASSWORD', self.secret_key)
+        
+    def connect(self) -> bool:
+        # First connect REST
+        rest_connected = super().connect()
+        if not rest_connected:
+            return False
+            
+        try:
+            import quickfix as fix
+            from execution.fix_engine import AlpacaFixEngine
+        except ImportError:
+            print("[FIX] quickfix package not installed. Cannot use AlpacaFixBroker.")
+            return False
+            
+        try:
+            self.fix_engine = AlpacaFixEngine(
+                password=self.fix_password,
+                execution_callback=self._on_execution_report
+            )
+            settings = fix.SessionSettings(self.fix_config_path)
+            storeFactory = fix.FileStoreFactory(settings)
+            logFactory = fix.FileLogFactory(settings)
+            
+            self.initiator = fix.SocketInitiator(self.fix_engine, storeFactory, settings, logFactory)
+            
+            self._fix_thread = threading.Thread(target=self.initiator.start)
+            self._fix_thread.daemon = True
+            self._fix_thread.start()
+            
+            print(f"[FIX] Initiator thread started using config {self.fix_config_path}")
+            return True
+        except Exception as e:
+            print(f"[FIX] Failed to start FIX engine: {e}")
+            return False
+            
+    def _on_execution_report(self, report):
+        print(f"[FIX] Execution Update: {report}")
+        
+    def place_order(self, order: Order) -> Tuple[bool, str]:
+        if self.fix_engine and self.fix_engine.is_logged_in:
+            try:
+                clOrdID = self.fix_engine.send_order(
+                    symbol=order.symbol,
+                    qty=abs(order.quantity),
+                    side=order.side.value.upper(),
+                    order_type=order.order_type.value.upper(),
+                    limit_price=order.limit_price
+                )
+                if clOrdID:
+                    order.id = clOrdID
+                    return True, clOrdID
+            except Exception as e:
+                print(f"[FIX] Exception sending order: {e}")
+                
+        print("[FIX] Falling back to REST API for order placement...")
+        return super().place_order(order)
+        
+    def disconnect(self):
+        if self.initiator:
+            self.initiator.stop()
+        super().disconnect()

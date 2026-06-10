@@ -136,6 +136,13 @@ class AlphaDecayMonitor:
         # Rank IC
         rank_ic, _ = self.calculate_information_coefficient(predictions, returns_1d, 'spearman')
         
+        # H-10 Fix: Correct t-statistic formula for correlation
+        n = len(predictions)
+        if n > 2 and ic_1d < 1.0:
+            t_stat = ic_1d * np.sqrt((n - 2) / (1 - ic_1d**2))
+        else:
+            t_stat = 0.0
+
         # Store metrics
         metrics = ICMetrics(
             date=date,
@@ -143,9 +150,9 @@ class AlphaDecayMonitor:
             ic_5d=ic_5d,
             ic_20d=ic_20d,
             rank_ic=rank_ic,
-            t_stat=ic_1d * np.sqrt(len(predictions)) if len(predictions) > 0 else 0,
+            t_stat=t_stat,
             p_value=p_1d,
-            sample_size=len(predictions)
+            sample_size=n
         )
         
         self.ic_history[signal_name].append(metrics)

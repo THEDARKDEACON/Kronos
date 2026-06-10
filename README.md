@@ -255,6 +255,15 @@ ledger = sim.run()
 
 The simulator tracks portfolio turnover between rebalancing periods and deducts costs proportionally. If your Sharpe ratio collapses with realistic costs, the alpha wasn't real.
 
+### Institutional High-Performance Execution
+
+Kronos is hardened against the "Five Points of Failure" common in retail algorithmic trading:
+1. **Survivorship Bias Elimination**: Strict Point-in-Time (PIT) S&P 500 universe caching.
+2. **Mathematical Temporal Isolation**: Aggressive timestamp truncation prior to PyTorch inference to prevent the "Time Machine Bug" (lookahead bias).
+3. **Execution Reality (EMS)**: An asynchronous Execution Management System (`execution/algorithmic_execution.py`) that slices large orders using Time-Weighted Average Price (TWAP) without blocking the main event loop.
+4. **Broker Reconciliation & Recovery**: Persistent TWAP state logging allows Kronos to seamlessly recover and resume child order slicing if the host machine reboots unexpectedly.
+5. **FIX Protocol Order Routing**: An optional `AlpacaFixBroker` utilizing `quickfix` for sub-millisecond, institutional-grade order routing over persistent TCP sockets (`execution/fix_engine.py`).
+
 ### Key Pipeline Components
 
 | Component | Location | Purpose |
@@ -273,7 +282,9 @@ The simulator tracks portfolio turnover between rebalancing periods and deducts 
 | **Factor Risk Model** | `risk/factor_model.py` | Barra-style multi-factor risk decomposition |
 | **Regime Detection** | `risk/regime_detector.py` | Volatility/correlation regime monitoring |
 | **Stress Testing** | `risk/stress_testing.py` | Historical scenario analysis |
-| **Live Trading** | `execution/broker_connector.py` | Alpaca/IBKR integration, VWAP execution |
+| **Live Trading** | `execution/broker_connector.py` | Alpaca/IBKR integration, VWAP fallback |
+| **Execution Management** | `execution/algorithmic_execution.py` | Async TWAP EMS, Crash Recovery |
+| **FIX Protocol Engine** | `execution/fix_engine.py` | Sub-millisecond institutional order routing |
 | **Market Impact** | `execution/market_impact.py` | Almgren-Chriss impact model |
 | **Alpha Monitor** | `research/alpha_monitor.py` | IC tracking, alpha decay detection |
 | **IC Tracker** | `research/ic_tracker.py` | Information Coefficient (IC) persistence and 5-day horizon settlement |

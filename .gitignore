@@ -81,6 +81,14 @@ cache/
 data/cache/
 data/pit_cache/
 
+# Execution State Recovery
+data/cache/recovery_state.json
+
+# FIX Engine Configuration & Dictionaries
+config/alpaca_fix.cfg
+config/FIX42.xml
+*.stunnel
+
 # Experiment tracking
 experiments/
 mlruns/
@@ -94,6 +102,7 @@ onnx_models/
 *.key
 *.pem
 secrets.json
+config/*.cfg
 
 # windsurf plans (dev only)
 .windsurf/

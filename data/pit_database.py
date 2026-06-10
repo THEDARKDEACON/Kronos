@@ -223,34 +223,29 @@ class PITFundamentalsDB:
                 fiscal_end = pd.to_datetime(period)
                 announcement_date = fiscal_end + timedelta(days=40)
                 
-                # Extract data
-                try:
-                    pe_ratio = tk.info.get('trailingPE') if i == 0 else None
-                    
-                    # Get debt from balance sheet
-                    debt = None
-                    if balance_sheet is not None and not balance_sheet.empty:
-                        try:
-                            total_debt = balance_sheet.loc['Total Debt', period]
-                            total_equity = balance_sheet.loc['Total Stockholder Equity', period]
-                            if total_equity and total_equity != 0:
-                                debt = (total_debt / total_equity) * 100
-                        except:
-                            pass
-                    
-                    # Get revenue
-                    revenue = None
-                    try:
-                        revenue = financials.loc['Total Revenue', period]
-                    except:
-                        pass
-                    
                     # Get EPS
                     eps = None
                     try:
                         eps = financials.loc['Basic EPS', period]
                     except:
                         pass
+                    
+                    # M-12 Fix: Do not use tk.info.get('trailingPE') as it leaks
+                    # today's P/E into the database. Calculate the true historical
+                    # P/E using the price at the time of announcement.
+                    pe_ratio = None
+                    if eps and eps > 0:
+                        try:
+                            # Fetch price around announcement date
+                            hist = tk.history(
+                                start=announcement_date,
+                                end=announcement_date + timedelta(days=5)
+                            )
+                            if not hist.empty:
+                                # Approximate annualized EPS for P/E
+                                pe_ratio = hist.iloc[0]['Close'] / (eps * 4)
+                        except Exception:
+                            pass
                     
                     snapshot = FundamentalSnapshot(
                         ticker=ticker,
@@ -418,10 +413,20 @@ def validate_no_lookahead(tickers: List[str],
     
     for ticker in tickers:
         if ticker in used_fundamentals.index:
-            # Assume used date is now (for validation)
-            # In real validation, track the actual fundamental period
+            # M-13 Fix: Extract the actual used fundamental date from the DataFrame.
+            # Passing as_of_date as the third argument was a tautological check
+            # that never fired.
+            row = used_fundamentals.loc[ticker]
+            if 'Announcement_Date' in used_fundamentals.columns:
+                used_date = pd.to_datetime(row['Announcement_Date'])
+            elif 'Data_AsOf' in used_fundamentals.columns:  # Simulated fallback
+                used_date = pd.to_datetime(row['Data_AsOf'])
+            else:
+                # If there's no temporal metadata, we can't validate it properly
+                used_date = as_of_date
+                
             is_valid &= detector.check_fundamental_timing(
-                ticker, as_of_date, as_of_date  # Simplified check
+                ticker, as_of_date, used_date
             )
     
     print(detector.generate_bias_report())

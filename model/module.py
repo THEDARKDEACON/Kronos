@@ -384,6 +384,10 @@ class MultiHeadCrossAttentionWithRoPE(nn.Module):
         else:
             attn_mask = None
 
+        # L-13: is_causal=True only during training (cross-attention on encoder
+        # context need not be causal at inference time). Document: this train/eval
+        # asymmetry is intentional — if cross-attention should never be causal,
+        # set is_causal=False unconditionally.
         is_causal_flag = self.training
 
         attn_output = F.scaled_dot_product_attention(
@@ -450,8 +454,15 @@ class DependencyAwareLayer(nn.Module):
         self.norm = RMSNorm(d_model)
 
     def forward(self, hidden_states, sibling_embed, key_padding_mask=None):
-        """hidden_states: [batch, seq_len, d_model]
-        sibling_embed: Embedding from another subtoken
+        """Cross-attend from sibling_embed (query) into hidden_states (key/value).
+
+        Args:
+            hidden_states: encoder context  [batch, seq_len, d_model]
+            sibling_embed: s1 token embedding used as query [batch, q_len, d_model]
+
+        Returns:
+            Enriched sibling embedding [batch, q_len, d_model]
+            (C-4 fix: residual applied to sibling_embed, not hidden_states)
         """
         attn_out = self.cross_attn(
             query=sibling_embed,
@@ -459,7 +470,10 @@ class DependencyAwareLayer(nn.Module):
             value=hidden_states,
             key_padding_mask=key_padding_mask
         )
-        return self.norm(hidden_states + attn_out)
+        # attn_out shape matches sibling_embed (the query), not hidden_states.
+        # Previous code incorrectly wrote hidden_states + attn_out which broadcast
+        # the single-position result across all T positions.
+        return self.norm(sibling_embed + attn_out)
 
 
 class TransformerBlock(nn.Module):
@@ -518,7 +532,8 @@ class FixedEmbedding(nn.Module):
         super(FixedEmbedding, self).__init__()
 
         w = torch.zeros(c_in, d_model).float()
-        w.require_grad = False
+        # L-11 fix: 'require_grad' was a typo (no-op). The actual gradient
+        # freeze is correctly applied via requires_grad=False on line below.
 
         position = torch.arange(0, c_in).float().unsqueeze(1)
         div_term = (torch.arange(0, d_model, 2).float() * -(math.log(10000.0) / d_model)).exp()

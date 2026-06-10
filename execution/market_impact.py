@@ -394,7 +394,7 @@ class TransactionCostAnalyzer:
             beta = np.linalg.lstsq(X, y, rcond=None)[0]
             eta = beta[1]
             gamma = beta[2]
-        except:
+        except Exception:  # L-1: don't swallow KeyboardInterrupt / SystemExit
             eta, gamma = 0.142, 0.314
         
         return {

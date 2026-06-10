@@ -183,41 +183,45 @@ class AdaptiveEnsemble:
         Returns:
             DataFrame with ensemble scores
         """
-        # Align tickers
-        common_tickers = kronos_signals.index.intersection(sentiment_signals.index)
-        
+        # Iterate all Kronos tickers; use sentiment where available, fall back to
+        # Kronos-only for tickers FinBERT did not cover (M-4).
+        sentiment_available = set(sentiment_signals.index)
+
         results = []
-        
-        for ticker in common_tickers:
+
+        for ticker in kronos_signals.index:
             # Kronos signal (normalize to -1 to 1)
             kronos_raw = kronos_signals.loc[ticker, 'Predicted_Return']
             kronos_norm = np.clip(kronos_raw / 0.5, -1, 1)  # Assuming 0.5 is typical max
-            
-            # Sentiment signal (already -1 to 1)
-            sentiment = sentiment_signals.loc[ticker, 'Sentiment_Score']
-            sentiment_conf = sentiment_signals.loc[ticker, 'Confidence']
-            
+
+            # Sentiment signal — use if available, else 0 (neutral)
+            if ticker in sentiment_available:
+                sentiment = sentiment_signals.loc[ticker, 'Sentiment_Score']
+                sentiment_conf = sentiment_signals.loc[ticker, 'Confidence']
+            else:
+                sentiment = 0.0
+                sentiment_conf = 0.0  # zero confidence → effectively ignored
+
             # Macro tilt (if available)
             macro = 0.0
             if macro_tilts and 'Growth' in macro_tilts:
-                # Adjust based on growth/value tilt
                 macro = macro_tilts.get('Growth', 0.0) * 0.3
-            
+
             # Weighted combination
             ensemble_score = (
                 self.current_weights['kronos'] * kronos_norm +
                 self.current_weights['sentiment'] * sentiment * sentiment_conf +
                 self.current_weights['macro'] * macro
             )
-            
+
             # Confidence based on signal agreement
             signals = [kronos_norm, sentiment, macro]
             signal_variance = np.var(signals)
             confidence = 1 - min(signal_variance * 2, 1.0)  # Lower variance = higher confidence
-            
+
             # Raw predicted return (denormalized)
             raw_return = ensemble_score * 0.5  # Scale back to return space
-            
+
             results.append({
                 'Ticker': ticker,
                 'Kronos_Signal': kronos_norm,
@@ -228,9 +232,10 @@ class AdaptiveEnsemble:
                 'Raw_Predicted_Return': raw_return,
                 'Kronos_Weight': self.current_weights['kronos'],
                 'Sentiment_Weight': self.current_weights['sentiment'],
-                'Macro_Weight': self.current_weights['macro']
+                'Macro_Weight': self.current_weights['macro'],
+                'Has_Sentiment': ticker in sentiment_available,
             })
-        
+
         df = pd.DataFrame(results).set_index('Ticker')
         return df.sort_values('Ensemble_Score', ascending=False)
 
