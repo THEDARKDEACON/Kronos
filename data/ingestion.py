@@ -63,59 +63,75 @@ def get_universe(as_of_date: Optional[str] = None) -> pd.DataFrame:
             f"Cannot fetch S&P 500 universe and no cache available: {exc}"
         ) from exc
 
-def fetch_pit_fundamental(ticker: str, sector: str, as_of_date: pd.Timestamp) -> dict:
+def fetch_pit_fundamental(ticker: str, sector: str, as_of_date: pd.Timestamp, max_retries: int = 3) -> dict:
+    """Fetch point-in-time fundamentals with exponential-backoff retry."""
+    import time as _time
     allowed_date = as_of_date - pd.Timedelta(days=90)
     result = {'Ticker': ticker, 'Sector': sector, 'PE_Ratio': None, 'Debt_To_Equity': None}
-    try:
-        stock = yf.Ticker(ticker)
-        if as_of_date.date() == pd.Timestamp.now().date():
-            info = stock.info
-            result['PE_Ratio'] = info.get('trailingPE', None)
-            result['Debt_To_Equity'] = info.get('debtToEquity', None)
+    for attempt in range(max_retries):
+        try:
+            stock = yf.Ticker(ticker)
+            if as_of_date.date() == pd.Timestamp.now().date():
+                info = stock.info
+                result['PE_Ratio'] = info.get('trailingPE', None)
+                result['Debt_To_Equity'] = info.get('debtToEquity', None)
+                return result
+
+            bs = stock.quarterly_balance_sheet
+            inc = stock.quarterly_income_stmt
+            if bs.empty or inc.empty:
+                return result
+
+            valid_cols = [col for col in bs.columns if isinstance(col, pd.Timestamp) and col <= allowed_date]
+            if not valid_cols:
+                return result
+
+            target_qtr = max(valid_cols)
+            try:
+                total_debt = bs.loc['Total Debt', target_qtr] if 'Total Debt' in bs.index else 0
+                equity = bs.loc['Stockholders Equity', target_qtr] if 'Stockholders Equity' in bs.index else None
+                if equity and equity > 0:
+                    result['Debt_To_Equity'] = (total_debt / equity) * 100
+            except KeyError:
+                pass
+            try:
+                eps = inc.loc['Basic EPS', target_qtr] if 'Basic EPS' in inc.index else None
+                if eps and eps > 0:
+                    hist_price = stock.history(start=as_of_date, end=as_of_date + pd.Timedelta(days=3))
+                    if not hist_price.empty:
+                        result['PE_Ratio'] = hist_price.iloc[0]['Close'] / (eps * 4)
+            except KeyError:
+                pass
             return result
-            
-        bs = stock.quarterly_balance_sheet
-        inc = stock.quarterly_income_stmt
-        if bs.empty or inc.empty: return result
-            
-        valid_cols = [col for col in bs.columns if isinstance(col, pd.Timestamp) and col <= allowed_date]
-        if not valid_cols: return result
-            
-        target_qtr = max(valid_cols)
-        try:
-            total_debt = bs.loc['Total Debt', target_qtr] if 'Total Debt' in bs.index else 0
-            equity = bs.loc['Stockholders Equity', target_qtr] if 'Stockholders Equity' in bs.index else None
-            if equity and equity > 0:
-                result['Debt_To_Equity'] = (total_debt / equity) * 100 
-        except KeyError: pass
-        try:
-            eps = inc.loc['Basic EPS', target_qtr] if 'Basic EPS' in inc.index else None
-            if eps and eps > 0:
-                hist_price = stock.history(start=as_of_date, end=as_of_date + pd.Timedelta(days=3))
-                if not hist_price.empty:
-                    result['PE_Ratio'] = hist_price.iloc[0]['Close'] / (eps * 4)
-        except KeyError: pass
-    except Exception: pass
+        except Exception as exc:  # M-6: was bare `except:` — now catches only Exception
+            if attempt < max_retries - 1:
+                _time.sleep(2 ** attempt)  # M-5: exponential backoff
+            else:
+                print(f"   [Fundamentals] Failed {ticker} after {max_retries} attempts: {exc}")
     return result
 
 def get_fundamentals(universe_df: pd.DataFrame, as_of_date: Optional[str] = None) -> pd.DataFrame:
     target_ts = pd.Timestamp(as_of_date) if as_of_date else pd.Timestamp.now()
     cache_file = os.path.join(CACHE_DIR, f"fundamentals_{target_ts.date()}.parquet")
-    
+
     if os.path.exists(cache_file):
         print(f"Loading Fundamentals from local Parquet Cache for [{target_ts.date()}]...")
         return pd.read_parquet(cache_file)
-        
+
     print(f"API Fetching PiT fundamentals as of [{target_ts.date()}]...")
     data = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=30) as executor:
-        futures = [executor.submit(fetch_pit_fundamental, row['Ticker'], row['Sector'], target_ts) for _, row in universe_df.iterrows()]
+    # M-5: reduced from 30 to 8 workers to avoid Yahoo Finance rate-limiting (HTTP 429)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        futures = [
+            executor.submit(fetch_pit_fundamental, row['Ticker'], row['Sector'], target_ts)
+            for _, row in universe_df.iterrows()
+        ]
         for future in concurrent.futures.as_completed(futures):
             data.append(future.result())
-            
+
     df = pd.DataFrame(data).set_index('Ticker')
     df = df.dropna(subset=['PE_Ratio', 'Debt_To_Equity'], how='all')
-    
+
     # Commit to Parquet Lake
     df.to_parquet(cache_file)
     return df
@@ -135,8 +151,8 @@ def get_historical_ohlcv(tickers: List[str], as_of_date: Optional[str] = None, l
         return {}
         
     target_ts = pd.Timestamp(as_of_date) if as_of_date else pd.Timestamp.now()
-    # M-11: include ticker count in key so a changed universe invalidates the cache
-    cache_file = os.path.join(CACHE_DIR, f"ohlcv_{target_ts.date()}_{len(tickers)}t.parquet")
+    # M-11: include ticker count and lookback in key so a changed universe/depth invalidates the cache
+    cache_file = os.path.join(CACHE_DIR, f"ohlcv_{target_ts.date()}_{len(tickers)}t_{lookback_days}d.parquet")
     
     # Try to load from cache first
     if os.path.exists(cache_file):
@@ -195,7 +211,7 @@ def get_historical_ohlcv(tickers: List[str], as_of_date: Optional[str] = None, l
         df = df[['open', 'high', 'low', 'close', 'volume']].copy()
         df = df[df.index <= target_ts]
         df['timestamps'] = df.index
-        df['amount'] = 0.0 
+        df['amount'] = df['close'] * df['volume']  # L-6: was hardcoded 0.0
         
         reset_df = df.reset_index(drop=True)
         

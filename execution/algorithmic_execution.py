@@ -12,8 +12,13 @@ from datetime import datetime, timedelta
 from dataclasses import dataclass
 from execution.broker_connector import BrokerInterface, Order, OrderType, OrderSide
 
-CACHE_DIR = "data/cache"
-RECOVERY_FILE = os.path.join(CACHE_DIR, "recovery_state.json")
+from pathlib import Path
+
+# M-2 FIX: use absolute path resolved from this file's location so the recovery
+# file is always written to the correct place regardless of the working directory
+# (important when running inside Docker or invoking from a different CWD).
+CACHE_DIR = str(Path(__file__).resolve().parent.parent / "data" / "cache")
+RECOVERY_FILE = str(Path(CACHE_DIR) / "recovery_state.json")
 
 @dataclass
 class TWAPSchedule:
@@ -121,45 +126,51 @@ class ExecutionManagementSystem:
     def _twap_worker(self):
         """Background thread that executes order slices when their time comes."""
         while not self._stop_event.is_set():
-            now = time.time()
-            completed = []
-            
-            for symbol, schedule in self.active_schedules.items():
-                if now >= schedule.next_execution_time and schedule.remaining_quantity > 0:
-                    # Time to execute a slice
-                    slice_qty = int(schedule.bucket_size)
-                    
-                    # Handle rounding on the final bucket
-                    if schedule.executed_buckets == schedule.num_buckets - 1:
-                        slice_qty = int(schedule.remaining_quantity)
-                        
-                    if slice_qty > 0:
-                        order = Order(
-                            symbol=schedule.symbol,
-                            side=OrderSide.BUY if schedule.side == 'buy' else OrderSide.SELL,
-                            quantity=slice_qty,
-                            order_type=OrderType.MARKET, # You can switch to LIMIT for passive filling
-                            time_in_force='ioc'
-                        )
-                        success, order_id = self.broker.place_order(order)
-                        
-                        if success:
-                            schedule.executed_quantity += slice_qty
-                            schedule.remaining_quantity -= slice_qty
-                            schedule.executed_buckets += 1
-                            schedule.next_execution_time = now + schedule.interval_seconds
-                            print(f"[EMS Worker] Executed {slice_qty} {symbol}. Remaining: {schedule.remaining_quantity}")
-                            OrderRecoveryManager.save_state(self.active_schedules)
-                        else:
-                            print(f"[EMS Worker] Failed to execute slice for {symbol}. Will retry.")
-                            schedule.next_execution_time = now + 10 # Retry in 10s
-                            
-                if schedule.remaining_quantity <= 0:
-                    completed.append(symbol)
-                    
-            for sym in completed:
-                print(f"[EMS] TWAP completed for {sym}")
-                del self.active_schedules[sym]
-                OrderRecoveryManager.save_state(self.active_schedules)
-                
-            time.sleep(1) # Prevent CPU spinning
+            try:  # L-5: top-level error boundary — prevent silent thread death
+                now = time.time()
+                completed = []
+
+                for symbol, schedule in list(self.active_schedules.items()):
+                    if now >= schedule.next_execution_time and schedule.remaining_quantity > 0:
+                        # Time to execute a slice
+                        slice_qty = int(schedule.bucket_size)
+
+                        # Handle rounding on the final bucket
+                        if schedule.executed_buckets == schedule.num_buckets - 1:
+                            slice_qty = int(schedule.remaining_quantity)
+
+                        if slice_qty > 0:
+                            order = Order(
+                                symbol=schedule.symbol,
+                                side=OrderSide.BUY if schedule.side == 'buy' else OrderSide.SELL,
+                                quantity=slice_qty,
+                                order_type=OrderType.MARKET,
+                                time_in_force='ioc'
+                            )
+                            success, order_id = self.broker.place_order(order)
+
+                            if success:
+                                schedule.executed_quantity += slice_qty
+                                schedule.remaining_quantity -= slice_qty
+                                schedule.executed_buckets += 1
+                                schedule.next_execution_time = now + schedule.interval_seconds
+                                print(f"[EMS Worker] Executed {slice_qty} {symbol}. Remaining: {schedule.remaining_quantity}")
+                                OrderRecoveryManager.save_state(self.active_schedules)
+                            else:
+                                print(f"[EMS Worker] Failed to execute slice for {symbol}. Will retry.")
+                                schedule.next_execution_time = now + 10  # Retry in 10s
+
+                    if schedule.remaining_quantity <= 0:
+                        completed.append(symbol)
+
+                for sym in completed:
+                    print(f"[EMS] TWAP completed for {sym}")
+                    del self.active_schedules[sym]
+                    OrderRecoveryManager.save_state(self.active_schedules)
+
+            except Exception as exc:  # L-5: catch unexpected errors, log and continue
+                print(f"[EMS Worker] Unhandled error: {exc}. Continuing in 5s.")
+                time.sleep(5)
+                continue
+
+            time.sleep(1)  # Prevent CPU spinning

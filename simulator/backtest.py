@@ -10,6 +10,7 @@ Results are written to experiments/backtest_results.json for the dashboard.
 Usage:
     python simulator/backtest.py                     # default: 2023-01-01 to today
     python simulator/backtest.py --start 2022-01-01 --end 2024-01-01 --universe 30
+    python simulator/backtest.py --seed 42           # reproducible inference
 """
 
 import sys
@@ -48,37 +49,49 @@ def _realised_return(
     ohlcv_dict: Dict[str, pd.DataFrame],
     weights: pd.Series,
     as_of_date: str,
-    horizon_days: int = 21,  # ~1 month of trading days
-) -> float:
+    horizon_trading_days: int = 21,  # trading days (≈1 month)
+):
     """
-    Compute weighted realised return over the next `horizon_days` calendar days
-    from `as_of_date`, using the OHLCV cache (no new data fetched).
+    Compute weighted realised return over the next `horizon_trading_days` **trading
+    days** from `as_of_date`. Returns (gross_return, min_intra_period_return).
     """
-    total_ret = 0.0
-    total_w = 0.0
-
     as_of_ts = pd.Timestamp(as_of_date)
-    end_ts = as_of_ts + timedelta(days=horizon_days + 14)  # add buffer for weekends
-
+    daily_portfolio_returns = np.zeros(horizon_trading_days)
+    
     for ticker, weight in weights.items():
         if ticker not in ohlcv_dict:
             continue
         df = ohlcv_dict[ticker]
-        if "timestamps" not in df.columns or "close" not in df.columns:
+        if "timestamps" not in df.columns or "close" not in df.columns or "open" not in df.columns:
             continue
+            
         df = df.sort_values("timestamps").reset_index(drop=True)
-        future = df[(df["timestamps"] >= as_of_ts) & (df["timestamps"] <= end_ts)]
-        if len(future) < 2:
+        future = df[df["timestamps"] > as_of_ts].reset_index(drop=True)
+        
+        if len(future) == 0:
             continue
-        p_start = float(future.iloc[0]["close"])
-        # Pick row closest to horizon_days trading days out
-        idx = min(horizon_days, len(future) - 1)
-        p_end = float(future.iloc[idx]["close"])
-        if p_start > 0:
-            total_ret += weight * (p_end - p_start) / p_start
-            total_w += abs(weight)
+            
+        p_start = float(future.iloc[0]["open"]) # Issue 5: execution at open
+        
+        if p_start <= 0:
+            continue
+            
+        # Issue 6: Delisting trap
+        # If a stock's data drops out prematurely (less than the full horizon)
+        # we assume it went bankrupt (100% loss) for the missing days.
+        actual_days = min(horizon_trading_days, len(future))
+        for i in range(actual_days):
+            p_current = float(future.iloc[i]["close"])
+            daily_portfolio_returns[i] += weight * ((p_current - p_start) / p_start)
+            
+        if actual_days < horizon_trading_days:
+            for i in range(actual_days, horizon_trading_days):
+                daily_portfolio_returns[i] += weight * -1.0  # Bankrupt assumption
 
-    return total_ret
+    gross_ret = float(daily_portfolio_returns[-1])
+    min_intra_ret = float(np.min(daily_portfolio_returns))
+    
+    return gross_ret, min_intra_ret
 
 
 class WalkForwardBacktest:
@@ -89,41 +102,67 @@ class WalkForwardBacktest:
         transaction_cost_bps: float = 5.0,
         max_drawdown_pct: float = 20.0,
         universe_limit: int = 20,  # Default small enough to run in minutes
+        seed: Optional[int] = None,
+        strict_pit: bool = True,
     ):
         self.start_date = start_date
         self.end_date = end_date or datetime.now().strftime("%Y-%m-%d")
         self.transaction_cost = transaction_cost_bps / 10_000
         self.max_drawdown = max_drawdown_pct / 100
         self.universe_limit = universe_limit
+        self.strict_pit = strict_pit
 
-        # --- Fetch universe and fundamentals ONCE using today's cached data ---
-        # ⚠️  SURVIVORSHIP BIAS WARNING (H-3): using today's fundamentals means the
-        # universe is filtered by *current* quality metrics, which systematically
-        # favours companies that survived and are healthy right now.  Historical
-        # rebalance steps therefore see a cleaner universe than would have existed
-        # at that point in time, inflating reported Sharpe and Calmar ratios.
-        # Mitigation: store point-in-time S&P constituent snapshots (one .parquet
-        # per year) and load the appropriate snapshot per rebalance date.
-        print("Fetching universe and fundamentals (once, using today's cache)...")
-        print("[WARNING] Backtest uses today's fundamentals for all historical steps — "
-              "survivorship bias will inflate performance metrics.")
-        universe = get_universe()
-        fundamentals_df = get_fundamentals(universe, as_of_date=None)  # today's cache
-        safe_tickers = get_safe_universe(fundamentals_df, drop_bottom_pct=0.25)
+        # M-7: Set random seeds for reproducibility of GPU inference
+        if seed is not None:
+            np.random.seed(seed)
+            try:
+                import torch
+                torch.manual_seed(seed)
+                if torch.cuda.is_available():
+                    torch.cuda.manual_seed_all(seed)
+                    # Deterministic CUDA ops (small speed penalty, required for reproducibility)
+                    torch.backends.cudnn.deterministic = True
+                    torch.backends.cudnn.benchmark = False
+            except ImportError:
+                pass
+            print(f"[Seed] Random seed set to {seed}")
+
+        # C-1: We still fetch the full OHLCV history once (it covers the entire
+        # date range and is sliced per-step).  Universe and fundamentals are now
+        # fetched INSIDE step() with the correct as_of_date to eliminate
+        # survivorship bias.  We keep a "today" fetch here only to derive the
+        # safe-ticker list for the OHLCV pre-fetch (we need to know which tickers
+        # to pull data for before we start stepping).
+        #
+        # ⚠️  SURVIVORSHIP BIAS NOTE (H-3): The OHLCV pre-fetch still uses today's
+        # ticker list as the candidate set.  Tickers that have been *added* to the
+        # S&P 500 since start_date are included, but were not investable then.
+        # The per-step fundamental filter (now PIT-correct) partially mitigates
+        # this.  Full mitigation requires historical constituent snapshots — see
+        # scripts/build_pit_universe.py.
+        print("Fetching today's universe for OHLCV pre-fetch candidate list...")
+        seed_universe = get_universe()                       # today's list, live mode
+        seed_fundamentals = get_fundamentals(seed_universe)  # today's cache
+        seed_tickers = get_safe_universe(seed_fundamentals, drop_bottom_pct=0.25)
         if self.universe_limit:
-            safe_tickers = safe_tickers[: self.universe_limit]
+            seed_tickers = seed_tickers[: self.universe_limit]
 
-        self.fundamentals_df = fundamentals_df
-        self.safe_tickers = safe_tickers
-        print(f"Safe universe: {len(safe_tickers)} tickers")
+        self.seed_tickers = seed_tickers
+        print(f"OHLCV candidate universe: {len(seed_tickers)} tickers")
 
-        # --- Fetch all OHLCV data ONCE (full history) then slice per step ---
-        # This replaces 42 separate API calls with 1 batch download.
-        print(f"Fetching full OHLCV history for {len(safe_tickers)} tickers...")
+        # Calculate dynamic lookback based on start_date
+        start_ts = pd.Timestamp(self.start_date)
+        today_ts = pd.Timestamp(datetime.now().date())
+        days_ago = max(0, (today_ts - start_ts).days)
+        # 400 trading days ≈ 580 calendar days; add 60-day forward buffer
+        lookback_needed = days_ago + 580 + 60
+
+        print(f"Fetching full OHLCV history for {len(seed_tickers)} tickers "
+              f"(Dynamic lookback: {lookback_needed} days)...")
         self.ohlcv_dict = get_historical_ohlcv(
-            safe_tickers,
-            as_of_date=None,          # fetch up to today
-            lookback_days=400 + 60,   # enough for signals + forward returns
+            seed_tickers,
+            as_of_date=None,           # fetch up to today
+            lookback_days=lookback_needed,
         )
         print(f"OHLCV loaded: {len(self.ohlcv_dict)} tickers")
 
@@ -145,11 +184,49 @@ class WalkForwardBacktest:
 
         as_of_ts = pd.Timestamp(as_of_date)
 
+        # C-1 FIX: Fetch fundamentals PIT for this specific rebalance date.
+        # get_fundamentals with as_of_date will use the quarterly financials
+        # that were available 90 days before as_of_date (see fetch_pit_fundamental),
+        # preventing look-ahead bias in fundamental signals.
+        # Universe PIT: if a historical parquet snapshot exists (built by
+        # scripts/build_pit_universe.py), it will be loaded automatically.
+        # Otherwise we fall back to today's universe with a visible warning.
+        try:
+            pit_universe = get_universe(as_of_date=as_of_date)
+        except ValueError as e:
+            if self.strict_pit:
+                raise ValueError(
+                    f"Strict PIT mode enabled: No historical universe snapshot for {as_of_date}. "
+                    "Run scripts/build_pit_universe.py to generate it, or run with --allow-fallback."
+                ) from e
+            else:
+                print(f"  [WARNING] No PIT universe snapshot for {as_of_date}. "
+                      "Falling back to current constituents. Run scripts/build_pit_universe.py "
+                      "to eliminate survivorship bias.")
+                pit_universe = get_universe()
+
+        pit_fundamentals = get_fundamentals(pit_universe, as_of_date=as_of_date)
+        safe_tickers = get_safe_universe(pit_fundamentals, drop_bottom_pct=0.25)
+        if self.universe_limit:
+            safe_tickers = safe_tickers[: self.universe_limit]
+
+        # Check if we have enough future data for a full period (prevents annualization distortion)
+        future_lengths = [
+            len(df[df["timestamps"] > as_of_ts])
+            for t, df in self.ohlcv_dict.items() if t in safe_tickers and "timestamps" in df.columns
+        ]
+        max_future_len = max(future_lengths) if future_lengths else 0
+        if max_future_len < 21:
+            print(f"  [End of Data] Skipping {as_of_date}: Only {max_future_len}/21 future days available.")
+            return None
+
         # Slice OHLCV to as_of_date (enforce no look-ahead)
         ohlcv_pit = {
             t: df[df["timestamps"] <= as_of_ts].reset_index(drop=True)
             for t, df in self.ohlcv_dict.items()
-            if "timestamps" in df.columns and len(df[df["timestamps"] <= as_of_ts]) >= 50
+            if t in safe_tickers
+            and "timestamps" in df.columns
+            and len(df[df["timestamps"] <= as_of_ts]) >= 50
         }
 
         if not ohlcv_pit:
@@ -162,7 +239,7 @@ class WalkForwardBacktest:
 
         portfolio = construct_portfolio(
             signals_df=signal_df,
-            fundamentals_df=self.fundamentals_df,
+            fundamentals_df=pit_fundamentals,
             ohlcv_dict=ohlcv_pit,
             risk_aversion=1.0,
             l2_penalty=0.5,
@@ -180,17 +257,29 @@ class WalkForwardBacktest:
                 abs(weights.get(t, 0.0) - self.previous_weights.get(t, 0.0))
                 for t in all_t
             )
-            turnover_cost = turnover * self.transaction_cost
+        else:
+            turnover = sum(abs(weights.get(t, 0.0)) for t in weights.index)
+            
+        turnover_cost = turnover * self.transaction_cost
 
-        # --- Realised return over next ~1 month ---
-        gross_ret = _realised_return(self.ohlcv_dict, weights, as_of_date, horizon_days=21)
+        # --- Realised return over next ~1 month (21 trading days) ---
+        # Passes full ohlcv_dict (not PIT-sliced) to see post-rebalance prices.
+        gross_ret, min_intra_ret = _realised_return(
+            self.ohlcv_dict, weights, as_of_date, horizon_trading_days=21
+        )
         net_ret = gross_ret - turnover_cost
 
         # --- Update equity ---
+        prev_val = self.current_value
         self.current_value *= 1 + net_ret
         if self.current_value > self.peak_value:
             self.peak_value = self.current_value
-        drawdown = (self.peak_value - self.current_value) / self.peak_value
+            
+        end_of_month_dd = (self.peak_value - self.current_value) / self.peak_value
+        intra_low_val = prev_val * (1 + min_intra_ret - turnover_cost)
+        intra_dd = (self.peak_value - intra_low_val) / self.peak_value if self.peak_value > 0 else 0.0
+        
+        drawdown = max(end_of_month_dd, intra_dd)
 
         self.equity_curve.append(
             {
@@ -298,6 +387,8 @@ if __name__ == "__main__":
     parser.add_argument("--end", default=None, help="End date YYYY-MM-DD (default: today)")
     parser.add_argument("--universe", type=int, default=None, help="Cap universe size")
     parser.add_argument("--max-drawdown", type=float, default=20.0, help="Circuit breaker %")
+    parser.add_argument("--seed", type=int, default=None, help="Random seed for reproducibility")
+    parser.add_argument("--allow-fallback", action="store_true", help="Allow fallback to modern universe if PIT missing")
     args = parser.parse_args()
 
     print("Initializing Kronos Walk-Forward Backtest...")
@@ -306,5 +397,7 @@ if __name__ == "__main__":
         end_date=args.end,
         universe_limit=args.universe,
         max_drawdown_pct=args.max_drawdown,
+        seed=args.seed,
+        strict_pit=not args.allow_fallback,
     )
     sim.run()

@@ -129,6 +129,15 @@ if data_mode == "Live Pipeline":
     live_broker = live_state.broker
     live_drift = live_state.drift
 
+bt_metrics = None
+bt_equity = None
+
+if data_mode == "Backtest Results":
+    bt_res = load_backtest_results()
+    if bt_res:
+        bt_metrics = bt_res.get("metrics")
+        bt_equity = bt_res.get("equity_curve")
+
 # M-15 Fix: Dynamic Universe Filter
 st.sidebar.header("Universe Filter")
 available_tickers = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "JPM", "V", "UNH"]
@@ -580,21 +589,7 @@ if data_mode == "Live Pipeline" and live_signals is not None and len(live_signal
 elif data_mode == "Live Pipeline":
     st.info("No signals cached — run the production pipeline first.")
 else:
-    ensemble_tickers = ["AAPL", "MSFT", "NVDA", "TSLA"]
-    for ticker in ensemble_tickers:
-        with st.expander(f"📊 {ticker} - Signal Breakdown (demo)"):
-            kronos_score = np.random.uniform(-1, 1)
-            sentiment_score = np.random.uniform(-1, 1)
-            macro_score = np.random.uniform(-1, 1)
-            final_signal = (
-                kronos_weight * kronos_score +
-                sentiment_weight * sentiment_score +
-                macro_weight * macro_score
-            )
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Kronos", f"{kronos_score:+.2f}")
-            c2.metric("FinBERT", f"{sentiment_score:+.2f}")
-            c3.metric("Final", f"{final_signal:+.2f}")
+    st.info("Awaiting historical signal data for backtest analysis.")
 
 st.divider()
 

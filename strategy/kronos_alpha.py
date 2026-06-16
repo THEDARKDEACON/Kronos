@@ -96,13 +96,15 @@ class KronosAlphaGenerator:
         y_timestamp_list = []
         valid_tickers = []
 
-        # Kronos predict_batch requires all matrices to be the EXACT same length
-        max_possible_len = max(len(df) for df in ohlcv_data.values())
-        strict_len = int(max_possible_len * 0.95) # Tolerate missing holidays, drop IPOs
-        
+        # H-5 FIX: strict_len was set to 95% of the longest ticker's history, which
+        # silently drops tickers from clean 400-row fetches when a stale cache
+        # contains a longer series.  Use a fixed minimum based on the lookback
+        # argument instead, tolerating up to 5% missing rows for holidays/gaps.
+        min_required_len = int(lookback * 0.90)
+
         for ticker in ohlcv_data:
             df = ohlcv_data[ticker]
-            if len(df) < strict_len:
+            if len(df) < min_required_len:
                 continue
             
             # Ensure df has timestamps column from index
@@ -118,7 +120,8 @@ class KronosAlphaGenerator:
                 else:
                     continue
             
-            x_df = df_processed.iloc[-strict_len:].reset_index(drop=True)
+            # Use the most recent min_required_len rows
+            x_df = df_processed.iloc[-min_required_len:].reset_index(drop=True)
             
             # Ensure timestamps is datetime
             x_df['timestamps'] = pd.to_datetime(x_df['timestamps'])

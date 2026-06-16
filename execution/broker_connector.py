@@ -113,13 +113,16 @@ class AlpacaBroker(BrokerInterface):
         self.rate_limit = rate_limit_per_second
         self.last_request_time = 0
         self.client = None
+        self._connected = False  # H-4: track connection state
         
     def connect(self) -> bool:
+        if self._connected:
+            return True  # H-4: already connected, avoid redundant session
         try:
             import alpaca_trade_api as tradeapi
             self.client = tradeapi.REST(
-                self.api_key, 
-                self.secret_key, 
+                self.api_key,
+                self.secret_key,
                 self.base_url,
                 api_version='v2'
             )
@@ -128,9 +131,11 @@ class AlpacaBroker(BrokerInterface):
             print(f"[Alpaca] Connected to {'PAPER' if self.paper else 'LIVE'} trading")
             print(f"[Alpaca] Account Status: {account.status}")
             print(f"[Alpaca] Buying Power: ${float(account.buying_power):,.2f}")
+            self._connected = True
             return True
         except Exception as e:
             print(f"[Alpaca] Connection failed: {e}")
+            self._connected = False
             return False
     
     def _rate_limit(self):
@@ -224,6 +229,7 @@ class AlpacaBroker(BrokerInterface):
     
     def disconnect(self):
         print("[Alpaca] Disconnected")
+        self._connected = False
 
 
 class InteractiveBrokersConnector(BrokerInterface):
@@ -241,15 +247,19 @@ class InteractiveBrokersConnector(BrokerInterface):
         self.ib = None
         
     def connect(self) -> bool:
+        if getattr(self, '_connected', False):
+            return True  # H-4: already connected
         try:
             from ib_insync import IB
             self.ib = IB()
             self.ib.connect(self.host, self.port, clientId=self.client_id)
             print(f"[IBKR] Connected to TWS @ {self.host}:{self.port}")
             print(f"[IBKR] {'PAPER' if self.paper else 'LIVE'} trading mode")
-            return self.ib.isConnected()
+            self._connected = self.ib.isConnected()
+            return self._connected
         except Exception as e:
             print(f"[IBKR] Connection failed: {e}")
+            self._connected = False
             return False
     
     def get_account_info(self) -> Dict:
@@ -318,6 +328,7 @@ class InteractiveBrokersConnector(BrokerInterface):
     def disconnect(self):
         if self.ib:
             self.ib.disconnect()
+            self._connected = False
             print("[IBKR] Disconnected")
 
 
@@ -325,19 +336,40 @@ class ExecutionEngine:
     """
     High-level execution engine that manages portfolio transitions.
     Handles rebalancing from target weights to actual positions.
+
+    Lifecycle:
+        engine = ExecutionEngine(broker)
+        engine.start()           # connects broker + starts EMS (call explicitly)
+        engine.rebalance_portfolio(weights)
+        engine.stop()            # shuts down EMS
     """
-    
+
     def __init__(self, broker: BrokerInterface, transaction_cost_bps: float = 5.0):
         self.broker = broker
         self.transaction_cost = transaction_cost_bps / 10000.0
         self.execution_history = []
+        self.ems = None  # C-3: EMS is NOT started here; call engine.start() explicitly
+
+    def start(self):
+        """Connect to broker and start the EMS background worker.
+
+        C-3 FIX: previously this happened inside __init__, which opened a live
+        broker connection whenever ExecutionEngine was instantiated (e.g. during
+        backtests, unit tests, or dry imports).  Now it is an explicit lifecycle
+        step that the caller must invoke.
+        """
         try:
             from execution.algorithmic_execution import ExecutionManagementSystem
             self.ems = ExecutionManagementSystem(self.broker)
             self.ems.start()
         except ImportError:
             self.ems = None
-        
+
+    def stop(self):
+        """Stop the EMS background worker."""
+        if self.ems:
+            self.ems.stop()
+
     def rebalance_portfolio(self, target_weights: Dict[str, float], 
                            sector_map: Dict[str, str] = None,
                            use_vwap: bool = False) -> Dict:
@@ -490,19 +522,19 @@ class ExecutionEngine:
         self.execution_history.append(report)
         return report
     
-    def execute_vwap_order(self, order: Order, 
-                          num_buckets: int = 10,
-                          duration_minutes: int = 60) -> Tuple[bool, List[str]]:
+    def execute_twap_order(
+        self,
+        order: Order,
+        num_buckets: int = 10,
+        duration_minutes: int = 60,
+    ) -> Tuple[bool, List[str]]:
         """
-        Execute a time-sliced order to reduce market impact.
+        Execute a time-sliced TWAP order (Time-Weighted Average Price) to reduce
+        market impact.  Splits a large order into equal-time IOC limit-order chunks.
 
-        NOTE: This is a TWAP-style implementation (equal time buckets), NOT true
-        VWAP. True VWAP requires real-time volume data to size each bucket
-        proportionally to historical intraday volume. Rename/upgrade if live
-        volume participation tracking is added.
-
-        Splits a large order into IOC limit-order chunks executed at fixed
-        intervals to reduce market impact.
+        L-2 FIX: previously named execute_vwap_order, which was misleading — true
+        VWAP requires real-time intraday volume participation data.  This is a pure
+        TWAP (equal time slices).  Rename to execute_twap_order for clarity.
 
         Args:
             order: The order to execute

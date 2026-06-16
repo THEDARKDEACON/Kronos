@@ -136,6 +136,14 @@ def run_pipeline(
             print(f"   Macro regime: {macro_regime}")
 
         ensemble = AdaptiveEnsemble(kronos_weight=0.5, sentiment_weight=0.3, macro_weight=0.2)
+        # M-3 FIX: adapt_weights() was never called, leaving the ensemble stuck on
+        # static base weights regardless of actual model IC performance.  We now
+        # call it after IC settlement so weights evolve once enough history exists.
+        ensemble.adapt_weights()
+        if verbose:
+            print(f"   Ensemble weights: kronos={ensemble.current_weights['kronos']:.2f} "
+                  f"sentiment={ensemble.current_weights['sentiment']:.2f} "
+                  f"macro={ensemble.current_weights['macro']:.2f}")
         macro_tilts = macro_detector.get_regime_factor_tilts(regime_state.primary_regime)
         ensemble_df = ensemble.combine_signals(kronos_signals, sentiment_df, macro_tilts)
         final_signals = pd.DataFrame({

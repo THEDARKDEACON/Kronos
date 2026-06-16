@@ -76,22 +76,24 @@ class MacroRegimeDetector:
                 indicators['vix_ma20'] = 20.0
                 indicators['vix_percentile'] = 0.5
             
-            # Yield Curve (10Y - 2Y)
+            # Yield Curve (10Y - 13-week T-Bill) — canonical recession indicator
+            # H-3 FIX: was using ^FVX (5-year), now uses ^IRX (13-week / ~3-month)
+            # which is the standard short-end proxy for the 2Y-10Y inversion signal.
             try:
                 ten_year = yf.download('^TNX', start=start_date, end=end_date, progress=False)
-                two_year = yf.download('^FVX', start=start_date, end=end_date, progress=False)  # 5Y as proxy
-                
-                if not ten_year.empty and not two_year.empty:
+                three_month = yf.download('^IRX', start=start_date, end=end_date, progress=False)
+
+                if not ten_year.empty and not three_month.empty:
                     tnx_current = ten_year['Close'].iloc[-1]
-                    fvx_current = two_year['Close'].iloc[-1]
-                    indicators['yield_curve'] = float(tnx_current - fvx_current)
+                    irx_current = three_month['Close'].iloc[-1]
+                    indicators['yield_curve'] = float(tnx_current - irx_current)
                     indicators['yield_curve_30d_avg'] = float(
-                        ten_year['Close'].tail(30).mean() - two_year['Close'].tail(30).mean()
+                        ten_year['Close'].tail(30).mean() - three_month['Close'].tail(30).mean()
                     )
                 else:
                     indicators['yield_curve'] = 0.5
                     indicators['yield_curve_30d_avg'] = 0.5
-            except:
+            except Exception:  # M-6: was bare except:
                 indicators['yield_curve'] = 0.5
                 indicators['yield_curve_30d_avg'] = 0.5
             

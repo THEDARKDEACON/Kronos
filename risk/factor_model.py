@@ -42,7 +42,7 @@ class FactorRiskModel:
     Multi-factor risk model for portfolio risk decomposition.
     Calculates factor exposures, covariance matrix, and risk contributions.
     """
-    
+
     # Factor return correlations (simplified Barra USE4 style)
     DEFAULT_FACTOR_CORR = np.array([
         [1.00, -0.15, -0.20,  0.00,  0.05, -0.70,  0.20,  0.10],  # Market
@@ -54,24 +54,46 @@ class FactorRiskModel:
         [0.20, -0.05, -0.30,  0.40,  0.20, -0.15,  1.00, -0.10],  # Growth
         [0.10, -0.15,  0.05,  0.00,  0.00,  0.15, -0.10,  1.00]   # Liquidity
     ])
-    
+
     FACTOR_NAMES = ['Market', 'Size', 'Value', 'Momentum', 'Quality', 'Volatility', 'Growth', 'Liquidity']
-    
+
     def __init__(self, lookback_days: int = 252, factor_volatility_annual: Optional[np.ndarray] = None):
         self.lookback = lookback_days
-        
+
         # Default annualized factor volatilities (Barra-style)
         if factor_volatility_annual is None:
             self.factor_vol = np.array([0.15, 0.08, 0.06, 0.08, 0.05, 0.10, 0.07, 0.04])
         else:
             self.factor_vol = factor_volatility_annual
-        
+
         # Build factor covariance matrix
         factor_corr = self.DEFAULT_FACTOR_CORR
         self.factor_cov = np.outer(self.factor_vol, self.factor_vol) * factor_corr
-        
+
         self.exposures_cache = {}
-        
+
+        # M-1 FIX: fetch SPY daily returns once so _estimate_beta has a real
+        # market proxy.  Falls back to None (cross-sectional mean) on failure.
+        self._spy_returns: Optional[pd.Series] = self._fetch_spy_returns()
+
+    def _fetch_spy_returns(self) -> Optional[pd.Series]:
+        """Fetch SPY daily returns for beta estimation (M-1)."""
+        try:
+            import yfinance as yf
+            spy = yf.download('SPY', period=f"{self.lookback}d", progress=False, auto_adjust=True)
+            if spy.empty:
+                return None
+            if hasattr(spy.columns, 'levels'):
+                # Multi-level columns from yfinance
+                closes = spy['Close'].squeeze()
+            else:
+                closes = spy['Close']
+            returns = closes.pct_change().dropna()
+            returns.index = pd.to_datetime(returns.index)
+            return returns
+        except Exception:
+            return None
+
     def calculate_factor_exposures(self, ticker: str, ohlcv_df: pd.DataFrame, 
                                    fundamentals: Optional[Dict] = None) -> FactorExposure:
         """
@@ -154,24 +176,35 @@ class FactorRiskModel:
         )
     
     def _estimate_beta(self, returns: pd.Series, market_returns: Optional[pd.Series] = None) -> float:
-        """Estimate market beta using rolling regression."""
+        """Estimate market beta using OLS vs SPY (or cross-sectional mean fallback)."""
         if market_returns is None:
-            # Assume market return is cross-sectional average (proxy)
+            # M-1 FIX: use pre-fetched SPY returns rather than the stock's own
+            # rolling mean, which produced a circular beta ≈ 1 for every ticker.
+            market_returns = self._spy_returns
+
+        if market_returns is None:
+            # Last resort: cross-sectional mean proxy (acknowledged approximation)
             market_returns = returns.rolling(20).mean()
-        
-        # Use last 1 year of data
+
+        # Align date indices
+        if hasattr(returns.index, 'tz') and returns.index.tz is not None:
+            returns = returns.copy()
+            returns.index = returns.index.tz_localize(None)
+        if hasattr(market_returns.index, 'tz') and market_returns.index.tz is not None:
+            market_returns = market_returns.copy()
+            market_returns.index = market_returns.index.tz_localize(None)
+
         valid_data = pd.DataFrame({'stock': returns, 'market': market_returns}).dropna()
-        
+
         if len(valid_data) < 30:
             return 1.0  # Default to market beta
-        
-        # Simple beta calculation: cov(stock, market) / var(market)
+
         cov = valid_data['stock'].cov(valid_data['market'])
         market_var = valid_data['market'].var()
-        
+
         if market_var > 0:
             beta = cov / market_var
-            return np.clip(beta, -2, 3)  # Reasonable bounds
+            return np.clip(beta, -2, 3)
         return 1.0
     
     def calculate_portfolio_factor_exposure(self, weights: Dict[str, float],
@@ -295,9 +328,11 @@ class FactorRiskModel:
         
         # Value at Risk (parametric, 95% confidence)
         var_95 = 1.645 * portfolio_vol * portfolio_value
-        
-        # Expected Shortfall (CVaR)
-        cvar_95 = 2.063 * portfolio_vol * portfolio_value  # For normal distribution
+
+        # Expected Shortfall (CVaR) — L-3: assumes Gaussian returns.
+        # Equity returns are fat-tailed; this underestimates tail risk by 20-40%.
+        # For production use, replace with historical simulation CVaR.
+        cvar_95 = 2.063 * portfolio_vol * portfolio_value  # Gaussian approximation
         
         return {
             'portfolio_exposure': portfolio_exp.to_series().to_dict(),
