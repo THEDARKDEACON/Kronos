@@ -243,22 +243,25 @@ portfolio = construct_portfolio(
 The `simulator/backtest.py` includes a **5 basis point (0.05%) turnover penalty** per trade side to test alpha survivability under real-world friction:
 
 ```python
-from simulator.backtest import BacktestSimulator
+from simulator.backtest import WalkForwardBacktest
 
-# 5 bps per side = 10 bps round-trip
-sim = BacktestSimulator(
-    target_dates=["2023-01-01", "2023-06-01"],
-    transaction_cost_bps=5.0  # Configurable
+# 5 bps per side, 20% max intra-month drawdown circuit breaker
+sim = WalkForwardBacktest(
+    start_date="2023-01-01",
+    end_date="2023-06-01",
+    transaction_cost_bps=5.0,
+    max_drawdown_pct=20.0,
+    strict_pit=True
 )
-ledger = sim.run()
+results = sim.run()
 ```
 
-The simulator tracks portfolio turnover between rebalancing periods and deducts costs proportionally. If your Sharpe ratio collapses with realistic costs, the alpha wasn't real.
+The simulator tracks portfolio turnover between rebalancing periods, deducts execution slippage, accurately tracks true daily intra-month drawdowns, and penalizes delisted/bankrupt stocks. If your Sharpe ratio collapses with realistic costs, the alpha wasn't real.
 
 ### Institutional High-Performance Execution
 
 Kronos is hardened against the "Five Points of Failure" common in retail algorithmic trading:
-1. **Survivorship Bias Elimination**: Strict Point-in-Time (PIT) S&P 500 universe caching.
+1. **Survivorship Bias Elimination**: Strict Point-in-Time (PIT) universe caching. The simulator will intentionally crash if historical constituents are missing to prevent contaminated backtests (can be overridden with `--allow-fallback`).
 2. **Mathematical Temporal Isolation**: Aggressive timestamp truncation prior to PyTorch inference to prevent the "Time Machine Bug" (lookahead bias).
 3. **Execution Reality (EMS)**: An asynchronous Execution Management System (`execution/algorithmic_execution.py`) that slices large orders using Time-Weighted Average Price (TWAP) without blocking the main event loop.
 4. **Broker Reconciliation & Recovery**: Persistent TWAP state logging allows Kronos to seamlessly recover and resume child order slicing if the host machine reboots unexpectedly.

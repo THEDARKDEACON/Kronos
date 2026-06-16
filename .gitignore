@@ -114,3 +114,8 @@ htmlcov/
 
 # Streamlit / Web UI
 .streamlit/
+
+# AI Assistants
+.gemini/
+.antigravity/
+artifacts/
