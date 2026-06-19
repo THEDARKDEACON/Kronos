@@ -37,8 +37,34 @@ logging.basicConfig(
 )
 logger = logging.getLogger('kronos.production')
 
-from pipeline.core import portfolio_to_weights, run_pipeline
+from pipeline.core import apply_long_only_portfolio, portfolio_to_weights, run_pipeline
 from execution.broker_connector import ExecutionEngine, create_broker
+
+LATEST_POSITIONS = CACHE_DIR / "latest_positions.parquet"
+
+
+def _load_prev_weights() -> dict | None:
+    """Load last rebalance targets for optimizer turnover penalty."""
+    if not LATEST_POSITIONS.exists():
+        return None
+    try:
+        import pandas as pd
+
+        df = pd.read_parquet(LATEST_POSITIONS)
+        if df.empty or "Weight" not in df.columns:
+            return None
+        weights = df["Weight"].to_dict()
+        return weights if weights else None
+    except Exception as exc:
+        logger.warning("Could not load prev_weights from cache: %s", exc)
+        return None
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    val = os.getenv(name)
+    if val is None:
+        return default
+    return val.lower() in ("1", "true", "yes")
 
 
 def _send_alert(message: str) -> None:
@@ -115,18 +141,27 @@ def _execute_portfolio(result, mode: str):
 
 def run_once() -> None:
     mode = os.getenv('KRONOS_MODE', 'dry').lower()
-    use_ensemble = os.getenv('USE_ENSEMBLE', 'true').lower() in ('1', 'true', 'yes')
-    use_kelly = os.getenv('USE_KELLY', 'true').lower() in ('1', 'true', 'yes')
+    use_ensemble = _env_bool('USE_ENSEMBLE', default=True)
+    use_kelly = _env_bool('USE_KELLY', default=True)
+    long_only = _env_bool('LONG_ONLY', default=False)
     universe_limit = os.getenv('UNIVERSE_LIMIT')
     universe_limit = int(universe_limit) if universe_limit else None
+    prev_weights = _load_prev_weights()
 
-    logger.info("Starting pipeline run (mode=%s)", mode)
+    logger.info(
+        "Starting pipeline run (mode=%s, long_only=%s, prev_positions=%d)",
+        mode,
+        long_only,
+        len(prev_weights) if prev_weights else 0,
+    )
 
     try:
         result = run_pipeline(
             use_ensemble=use_ensemble,
             use_kelly=use_kelly,
             universe_limit=universe_limit,
+            prev_weights=prev_weights,
+            long_only=long_only,
             verbose=False,
         )
         logger.info(

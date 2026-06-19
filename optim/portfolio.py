@@ -18,6 +18,7 @@ def construct_portfolio(
     use_kelly_criterion: bool = False,  # Use Kelly criterion instead of mean-variance
     kelly_fraction: float = 0.25,       # Fractional Kelly (quarter-Kelly recommended)
     portfolio_aum: float = 1_000_000,   # H-2: portfolio AUM in dollars for liquidity cap
+    exposure_multiplier: float = 1.0,   # Regime-based gross exposure scaling
 ) -> pd.DataFrame:
     """
     Constructs a SOTA Market-Neutral Market Portfolio using Long/Short Optimization.
@@ -59,6 +60,10 @@ def construct_portfolio(
         max_gross_exposure = 0.97
         vix_hedge_allocation = 0.03
         print("Withheld 3% of capital for pure Volatility (VIX) Hedging.")
+
+    if exposure_multiplier < 0.999:
+        max_gross_exposure *= exposure_multiplier
+        print(f"   [Risk] Regime exposure multiplier: {exposure_multiplier:.2f} → gross cap {max_gross_exposure:.2f}")
         
     # === DYNAMIC BOUNDARY SCALING (LONG / SHORT) ===
     recent_returns = daily_returns.tail(30)

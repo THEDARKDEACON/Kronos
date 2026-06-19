@@ -84,7 +84,10 @@ def record_predictions(
 # Settlement
 # ---------------------------------------------------------------------------
 
-def settle_predictions(ohlcv_dict: Dict[str, pd.DataFrame]) -> None:
+def settle_predictions(
+    ohlcv_dict: Dict[str, pd.DataFrame],
+    reference_date: Optional[str] = None,
+) -> None:
     """
     Settle any pending predictions whose as_of_date is ≥ SETTLEMENT_LAG_DAYS ago.
 
@@ -93,12 +96,14 @@ def settle_predictions(ohlcv_dict: Dict[str, pd.DataFrame]) -> None:
 
     Args:
         ohlcv_dict: The OHLCV dict already loaded by the pipeline (no extra API calls).
+        reference_date: Evaluation anchor (backtest as_of_date); defaults to today.
     """
     if not PREDICTIONS_FILE.exists():
         return
 
     pending = pd.read_parquet(PREDICTIONS_FILE)
-    cutoff = (datetime.now() - timedelta(days=SETTLEMENT_LAG_DAYS)).strftime("%Y-%m-%d")
+    anchor = pd.Timestamp(reference_date) if reference_date else pd.Timestamp.now()
+    cutoff = (anchor - timedelta(days=SETTLEMENT_LAG_DAYS)).strftime("%Y-%m-%d")
     to_settle = pending[(pending["as_of_date"] <= cutoff) & (~pending["settled"])]
 
     if to_settle.empty:
@@ -214,3 +219,29 @@ def load_ic_summary() -> Optional[pd.DataFrame]:
     if IC_HISTORY_FILE.exists():
         return pd.read_parquet(IC_HISTORY_FILE)
     return None
+
+
+def load_ic_history_for_ensemble() -> Dict[str, list]:
+    """
+    Load settled IC series for adaptive ensemble weighting.
+
+    Returns dict keyed by model name (kronos, sentiment, macro).
+    Sentiment/macro use dedicated columns when present; otherwise empty
+    (ensemble falls back to base weights for those models).
+    """
+    history = {"kronos": [], "sentiment": [], "macro": []}
+    df = load_ic_summary()
+    if df is None or df.empty:
+        return history
+
+    if "kronos" in df.columns:
+        history["kronos"] = df["kronos"].dropna().tolist()
+    if "sentiment" in df.columns:
+        history["sentiment"] = df["sentiment"].dropna().tolist()
+    elif "ensemble" in df.columns:
+        # Legacy: ensemble IC as proxy until per-model sentiment IC is tracked
+        history["sentiment"] = df["ensemble"].dropna().tolist()
+    if "macro" in df.columns:
+        history["macro"] = df["macro"].dropna().tolist()
+    return history
+

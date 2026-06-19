@@ -131,11 +131,16 @@ class AdaptiveEnsemble:
         if len(self.performance_history[model_name]) > 63:
             self.performance_history[model_name] = self.performance_history[model_name][-63:]
     
-    def adapt_weights(self):
+    def adapt_weights(self, ic_history: Optional[Dict[str, List[float]]] = None):
         """
         Adapt ensemble weights based on recent IC performance.
         Uses exponential weighting of recent ICs.
         """
+        if ic_history:
+            for model_name, values in ic_history.items():
+                if model_name in self.ic_history and values:
+                    self.ic_history[model_name] = list(values)
+
         new_weights = {}
         
         for model_name in ['kronos', 'sentiment', 'macro']:

@@ -26,6 +26,7 @@ IC_HISTORY_PATH = ROOT_DIR / "research/ic_history.parquet"
 from dotenv import load_dotenv
 load_dotenv()
 
+from dashboard.demo_views import generate_demo_equity_series, generate_sample_portfolio
 from dashboard.live_data import (
     get_data_freshness_indicator,
     load_backtest_results,
@@ -34,35 +35,6 @@ from dashboard.live_data import (
     load_signal_ic_history,
     load_trade_history,
 )
-
-# Demo data for non-live modes only
-def generate_sample_portfolio():
-    tickers = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "JPM", "V", "UNH"]
-    weights = np.random.uniform(-5, 15, len(tickers))
-    weights = weights / np.sum(np.abs(weights)) * 100
-    return pd.DataFrame({
-        "Ticker": tickers,
-        "Weight": weights,
-        "Signal": np.random.uniform(-1, 1, len(tickers)),
-        "Entry_Price": np.random.uniform(50, 500, len(tickers)),
-        "Current_Price": np.random.uniform(50, 500, len(tickers)),
-        "PnL_Pct": np.random.uniform(-10, 20, len(tickers)),
-        "Sector": np.random.choice(["Tech", "Finance", "Health", "Consumer"], len(tickers)),
-    })
-
-def generate_sample_equity_curve(days=90):
-    dates = pd.date_range(end=datetime.now(), periods=days, freq='D')
-    returns = np.random.normal(0.0005, 0.015, days)
-    equity = 100 * np.cumprod(1 + returns)
-    benchmark = 100 * np.cumprod(1 + np.random.normal(0.0003, 0.012, days))
-    peak = np.maximum.accumulate(equity)
-    drawdown = (equity - peak) / peak * 100
-    return pd.DataFrame({
-        "Date": dates,
-        "Equity": equity,
-        "Benchmark": benchmark,
-        "Drawdown": drawdown,
-    })
 
 # ============================================================================
 # MAIN DASHBOARD SETUP
@@ -284,12 +256,7 @@ with col1:
     else:
         # Clearly labelled demo fallback
         st.caption("⚠\ufe0f Demo data — run `python simulator/backtest.py` to replace with real results")
-        dates = pd.date_range(start=start_date, end=end_date, freq='D')
-        n_days = len(dates)
-        returns = np.random.normal(0.0005, 0.015, n_days)
-        equity  = 100 * np.cumprod(1 + returns)
-        peak    = np.maximum.accumulate(equity)
-        drawdown = (equity - peak) / peak * 100
+        dates, equity, drawdown = generate_demo_equity_series(start_date, end_date)
         data_label = "Demo (random)"
 
     fig = make_subplots(

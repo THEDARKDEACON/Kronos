@@ -68,7 +68,30 @@ def test_run_pipeline_dry(mock_pipeline_data):
     mock_gen.generate_signals.assert_called_once()
 
 
-def test_portfolio_to_weights(mock_pipeline_data):
+def test_run_pipeline_with_ohlcv_override(mock_pipeline_data):
+    universe, fundamentals, ohlcv, kronos_signals, portfolio = mock_pipeline_data
+    mock_gen = MagicMock()
+    mock_gen.generate_signals.return_value = kronos_signals
+
+    with patch('pipeline.core.get_universe', return_value=universe), \
+         patch('pipeline.core.get_fundamentals', return_value=fundamentals), \
+         patch('pipeline.core.get_safe_universe', return_value=['AAPL', 'MSFT']), \
+         patch('pipeline.core.get_historical_ohlcv') as mock_fetch, \
+         patch('pipeline.core.KronosAlphaGenerator', return_value=mock_gen), \
+         patch('pipeline.core.construct_portfolio', return_value=portfolio), \
+         patch('pipeline.core.ENSEMBLE_AVAILABLE', False):
+
+        result = run_pipeline(
+            ohlcv_override=ohlcv,
+            as_of_date='2024-06-01',
+            use_ensemble=False,
+            verbose=False,
+        )
+
+    mock_fetch.assert_not_called()
+    assert len(result.portfolio) == 2
+
+
     _, _, _, _, portfolio = mock_pipeline_data
     weights = portfolio_to_weights(portfolio)
     assert weights == {'AAPL': 0.5, 'MSFT': -0.5}

@@ -275,7 +275,12 @@ class NewsSentimentFetcher:
         self._min_request_interval = 1.2  # NewsAPI free tier: 100 requests/day = ~1 per 14min
         # For paid tier: reduce to 0.1 (10 req/sec)
         
-    def fetch_news_headlines(self, ticker: str, days: int = 7) -> List[Dict]:
+    def fetch_news_headlines(
+        self,
+        ticker: str,
+        days: int = 7,
+        as_of_date: Optional[str] = None,
+    ) -> List[Dict]:
         """
         Fetch news headlines for a ticker using NewsAPI.
 
@@ -293,12 +298,17 @@ class NewsSentimentFetcher:
             return []
 
         try:
-            return self._fetch_from_newsapi(ticker, days)
+            return self._fetch_from_newsapi(ticker, days, as_of_date=as_of_date)
         except Exception as e:
             print(f"[NewsAPI] Error fetching for {ticker}: {e}")
             return []
     
-    def _fetch_from_newsapi(self, ticker: str, days: int) -> List[Dict]:
+    def _fetch_from_newsapi(
+        self,
+        ticker: str,
+        days: int,
+        as_of_date: Optional[str] = None,
+    ) -> List[Dict]:
         """
         Fetch news from NewsAPI with rate limiting.
         
@@ -315,11 +325,13 @@ class NewsSentimentFetcher:
         # Build query - search for ticker symbol and company name
         query = f"{ticker} stock OR {ticker} earnings OR {ticker} finance"
         
+        anchor = pd.Timestamp(as_of_date) if as_of_date else pd.Timestamp.now()
+
         url = "https://newsapi.org/v2/everything"
         params = {
             'q': query,
-            'from': (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d'),
-            'to': datetime.now().strftime('%Y-%m-%d'),
+            'from': (anchor - timedelta(days=days)).strftime('%Y-%m-%d'),
+            'to': anchor.strftime('%Y-%m-%d'),
             'language': 'en',
             'sortBy': 'relevancy',
             'pageSize': 20,  # Max 100 for paid, 20 for free
@@ -364,30 +376,33 @@ class NewsSentimentFetcher:
             print(f"[NewsAPI] Unexpected error: {e}")
             return []
     
-    def get_ticker_sentiment(self, ticker: str, lookback_days: int = 7) -> SentimentSignal:
+    def get_ticker_sentiment(
+        self,
+        ticker: str,
+        lookback_days: int = 7,
+        as_of_date: Optional[str] = None,
+    ) -> SentimentSignal:
         """
         Get aggregated sentiment for a ticker.
         """
-        # Fetch news
-        news_items = self.fetch_news_headlines(ticker, lookback_days)
-        
+        news_items = self.fetch_news_headlines(ticker, lookback_days, as_of_date=as_of_date)
+        anchor = pd.Timestamp(as_of_date).to_pydatetime() if as_of_date else datetime.now()
+
         if not news_items:
             return SentimentSignal(
                 ticker=ticker,
                 sentiment_score=0.0,
                 confidence=0.0,
                 source='news',
-                timestamp=datetime.now(),
+                timestamp=anchor,
                 num_mentions=0,
                 exponential_decay=0.0
             )
-        
-        # Analyze sentiment for each headline
+
         texts = [item['title'] + ' ' + item.get('description', '') for item in news_items]
         sentiments = self.analyzer.analyze_batch(texts)
-        
-        # Calculate time-decayed weighted sentiment
-        current_time = datetime.now()
+
+        current_time = anchor
         weighted_scores = []
         total_weight = 0.0
         
@@ -421,21 +436,26 @@ class NewsSentimentFetcher:
             sentiment_score=avg_sentiment,
             confidence=avg_confidence,
             source='news',
-            timestamp=datetime.now(),
+            timestamp=anchor,
             num_mentions=len(news_items),
             exponential_decay=exponential_decay
         )
     
-    def get_universe_sentiment(self, tickers: List[str], lookback_days: int = 7) -> pd.DataFrame:
+    def get_universe_sentiment(
+        self,
+        tickers: List[str],
+        lookback_days: int = 7,
+        as_of_date: Optional[str] = None,
+    ) -> pd.DataFrame:
         """
         Get sentiment for multiple tickers.
-        
+
         Returns DataFrame with sentiment metrics.
         """
         results = []
-        
+
         for ticker in tickers:
-            signal = self.get_ticker_sentiment(ticker, lookback_days)
+            signal = self.get_ticker_sentiment(ticker, lookback_days, as_of_date=as_of_date)
             results.append({
                 'Ticker': signal.ticker,
                 'Sentiment_Score': signal.sentiment_score,

@@ -1,7 +1,7 @@
 import sys
 import os
 import pandas as pd
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 # The Kronos Engine modules are now located natively in the same repo, so no path append is necessary
 
@@ -81,7 +81,13 @@ class KronosAlphaGenerator:
         total_memory = torch.cuda.get_device_properties(0).total_memory
         return total_memory / (1024**3)
 
-    def generate_signals(self, ohlcv_data: Dict[str, pd.DataFrame], lookback: int = 400, pred_len: int = 10) -> pd.DataFrame:
+    def generate_signals(
+        self,
+        ohlcv_data: Dict[str, pd.DataFrame],
+        lookback: int = 400,
+        pred_len: int = 10,
+        as_of_date: Optional[str] = None,
+    ) -> pd.DataFrame:
         """
         Takes the dictionary of OHLCV DataFrames and runs predict_batch.
         Returns a DataFrame mapping Ticker -> Predicted Return
@@ -126,11 +132,8 @@ class KronosAlphaGenerator:
             # Ensure timestamps is datetime
             x_df['timestamps'] = pd.to_datetime(x_df['timestamps'])
             
-            # === HIGH PERFORMANCE UPGRADE: TEMPORAL ISOLATION ===
-            # Explicitly drop the last row if its timestamp is strictly greater than 
-            # the current execution time, preventing future data leakage (Lookahead Bias).
-            # This mathematically guarantees the "Time Machine Bug" cannot happen.
-            current_exec_time = pd.Timestamp.now()
+            # Drop rows after the evaluation date (backtest) or now (live).
+            current_exec_time = pd.Timestamp(as_of_date) if as_of_date else pd.Timestamp.now()
             x_df = x_df[x_df['timestamps'] <= current_exec_time].reset_index(drop=True)
             
             # Standardize column names (yFinance uses Open/High/Low/Close/Volume)

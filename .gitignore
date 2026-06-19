@@ -24,11 +24,10 @@ MANIFEST
 # Jupyter Notebook
 .ipynb_checkpoints
 
-# PyCharm
+# IDEs
 .idea/
-
-# VS Code
 .vscode/
+.cursor/
 
 # macOS
 .DS_Store
@@ -43,79 +42,86 @@ Desktop.ini
 # Linux
 *~
 
-# Data files (large files)
+# Data files (large / local)
 *.feather
 *.parquet
 *.h5
 *.hdf5
+*.csv
+!examples/data/**/*.csv
+!tests/data/**/*.csv
+!finetune_csv/data/**/*.csv
 
-# Model files (large files)
+# Model weights & runtime caches
 *.pth
 *.pt
 *.ckpt
 *.bin
+*.safetensors
+*.onnx
+onnx_models/
+models/hf_cache/
+models/onnx/
 
-# Logs
+# Logs & runtime output
 *.log
 logs/
 *.out
 
-# Environment
+# Environment & secrets
 .env
+.env.local
+.env.*.local
 .venv
 env/
 venv/
 ENV/
 env.bak/
 venv.bak/
-
-# Temporary files
-*.tmp
-*.temp
-temp/
-tmp/
 .python-version
-
-# Kronos specific - Data cache
-cache/
-data/cache/
-data/pit_cache/
-
-# Execution State Recovery
-data/cache/recovery_state.json
-
-# FIX Engine Configuration & Dictionaries
-config/alpaca_fix.cfg
-config/FIX42.xml
-*.stunnel
-
-# Experiment tracking
-experiments/
-mlruns/
-mlartifacts/
-
-# ONNX models
-*.onnx
-onnx_models/
 
 # API keys and secrets
 *.key
 *.pem
 secrets.json
-config/*.cfg
 
-# windsurf plans (dev only)
-.windsurf/
+# Kronos data cache & PIT stores
+cache/
+data/cache/
+data/pit_cache/
 
-# Pytest
+# Execution state recovery
+data/cache/recovery_state.json
+
+# FIX engine (local config)
+config/alpaca_fix.cfg
+config/FIX42.xml
+*.stunnel
+
+# Research & experiment outputs
+experiments/
+mlruns/
+mlartifacts/
+research/ic_history.parquet
+research/pending_predictions.parquet
+
+# Web UI / dashboard local state
+.streamlit/
+webui/static/uploads/
+webui/instance/
+
+# Test & coverage
 .pytest_cache/
 .coverage
 htmlcov/
+.mypy_cache/
+.ruff_cache/
 
-# Streamlit / Web UI
-.streamlit/
-
-# AI Assistants
+# AI assistant / dev tooling
+.windsurf/
 .gemini/
 .antigravity/
 artifacts/
+
+# Docker local overrides
+docker-compose.override.yml

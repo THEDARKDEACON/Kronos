@@ -213,18 +213,176 @@ Running this script will generate a plot comparing the ground truth data against
 
 Additionally, we provide a script that makes predictions without Volume and Amount data, which can be found in [`examples/prediction_wo_vol_example.py`](examples/prediction_wo_vol_example.py).
 
-## 🏭 Production Pipeline Features
+## 🏭 Quant Research Pipeline
 
-This repository includes a production-oriented quantitative pipeline with the following advanced features:
+This fork extends the upstream Kronos model with a **single end-to-end systematic equity pipeline**: signals → portfolio optimization → walk-forward backtest → paper/live execution.
+
+> **Scope:** This is a **research platform**, not production FinTech. Validate with strict backtests and paper trading before live capital.
+
+### Architecture
+
+```
+main.py / scripts/run_production.py
+        ↓
+pipeline/core.py          ← shared run_pipeline() (live + backtest)
+        ↓
+strategy/kronos_alpha.py  → optim/portfolio.py → execution/broker_connector.py
+        ↓
+simulator/backtest.py     ← same pipeline, PIT OHLCV injection
+dashboard/app.py          ← Streamlit monitoring (live + backtest modes)
+webui/                    ← separate Kronos forecast demo (Flask, port 7070)
+```
+
+### Quick Start (Pipeline)
+
+```bash
+cp .env.example .env          # set KRONOS_MODE, Alpaca keys, MODEL_SIZE
+pip install -r requirements.txt
+
+python3 scripts/preflight.py  # fast checks, no model load
+python3 scripts/validate_env.py
+
+# One-shot research run
+python3 main.py
+
+# Production scheduler (dry / paper / live)
+KRONOS_MODE=dry python3 scripts/run_production.py --once
+
+# Walk-forward backtest (writes experiments/backtest_results.json)
+python3 scripts/build_pit_universe.py --start-year 2015 --end-year 2024
+python3 simulator/backtest.py --start 2020-01-01 --end 2024-01-01 --universe 20
+
+# Dashboard
+streamlit run dashboard/app.py
+```
+
+### Modes
+
+| `KRONOS_MODE` | Data | Broker | Notes |
+|---------------|------|--------|-------|
+| `dry` | Live | None | Default — saves cache, no orders |
+| `paper` | Live | Alpaca paper | Recommended before live |
+| `live` | Live | Alpaca live | Real money |
+
+### Key Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `KRONOS_MODE` | `dry`, `paper`, or `live` |
+| `MODEL_SIZE` | `small`, `base`, or `large` |
+| `USE_ENSEMBLE` | Kronos + FinBERT + macro (`true`/`false`) |
+| `USE_KELLY` | Kelly criterion in optimizer |
+| `LONG_ONLY` | Drop shorts, renormalize longs (recommended for paper) |
+| `UNIVERSE_LIMIT` | Cap tickers after fundamental filter |
+| `ALPACA_API_KEY` / `ALPACA_SECRET_KEY` | Required for paper/live |
+| `NEWSAPI_KEY` | Optional — sentiment falls back to neutral |
+| `REBALANCE_FREQUENCY` | `daily`, `weekly`, or `monthly` (production runner) |
+
+See `.env.example` for the full list.
+
+### Ops Scripts
+
+| Script | Purpose |
+|--------|---------|
+| `scripts/preflight.py` | Pre-run checks (disk, cache, keys) — no model load |
+| `scripts/validate_env.py` | Test Alpaca, NewsAPI, etc. |
+| `scripts/health_check.py` | Full system check (`--light` skips model load) |
+| `scripts/run_production.py` | Scheduled pipeline + optional execution |
+| `scripts/build_pit_universe.py` | Historical S&P 500 snapshots (survivorship) |
+
+### CVXPY Portfolio Optimization
+
+Portfolio construction in `optim/portfolio.py` uses **CVXPY + OSQP**:
+
+- Market-neutral long/short (or **long-only** when `LONG_ONLY=true`)
+- Sector gross caps, ADV liquidity limits, optional Kelly criterion
+- Turnover penalty when `prev_weights` are available (loaded from `data/cache/latest_positions.parquet` in production)
+- Regime-based `exposure_multiplier` from `risk/regime_detector.py`
+
+```python
+from pipeline.core import run_pipeline
+
+result = run_pipeline(use_ensemble=False, use_kelly=True, verbose=True)
+```
+
+### Walk-Forward Backtest
+
+`simulator/backtest.py` calls the **same** `run_pipeline()` as production, with PIT OHLCV truncation and `as_of_date` threaded through Kronos, macro, and sentiment layers.
+
+```python
+from simulator.backtest import WalkForwardBacktest
+
+sim = WalkForwardBacktest(
+    start_date="2023-01-01",
+    end_date="2024-01-01",
+    universe_limit=20,
+    strict_pit=True,       # requires PIT universe snapshots
+    use_ensemble=False,    # start simple; ensemble is PIT-aware when enabled
+)
+results = sim.run()
+```
+
+- **5 bps/side** turnover cost between rebalances
+- Results → `experiments/backtest_results.json` (dashboard **Backtest Results** mode)
+- Use `--allow-fallback` only for plumbing tests — not for research conclusions
+
+### Research Integrity
+
+1. **PIT universe** — run `build_pit_universe.py`; strict backtest fails without snapshots
+2. **Temporal isolation** — Kronos/macro/sentiment respect `as_of_date` in backtest
+3. **IC tracker** — `research/ic_tracker.py` records predictions, settles rank IC, feeds ensemble weights
+4. **Paper validation** — run `KRONOS_MODE=paper` for 30–60 days; compare dashboard Target vs Actual vs Drift
+
+### Key Pipeline Components
+
+| Component | Location | Purpose |
+|-----------|----------|---------|
+| **Pipeline core** | `pipeline/core.py` | Shared `run_pipeline()` for live + backtest |
+| **Alpha generator** | `strategy/kronos_alpha.py` | Kronos batch inference → predicted returns |
+| **Fundamental filter** | `strategy/fundamental.py` | Quality/safety universe filter |
+| **Portfolio optimizer** | `optim/portfolio.py` | CVXPY L/S neutral + Kelly + liquidity |
+| **Backtest** | `simulator/backtest.py` | Monthly walk-forward, realized P&L |
+| **TCA backtest** | `simulator/backtest_tca.py` | Optional Almgren–Chriss cost layer |
+| **Data ingestion** | `data/ingestion.py` | Universe, fundamentals, OHLCV + Parquet cache |
+| **Corporate actions** | `data/corporate_actions.py` | Split/dividend adjustments |
+| **PIT fundamentals** | `data/pit_database.py` | Announcement-date fundamentals (research) |
+| **FinBERT sentiment** | `signals/finbert_sentiment.py` | NewsAPI + FinBERT scores |
+| **Macro regime** | `signals/macro_regime.py` | VIX / yield-curve regime |
+| **Signal ensemble** | `signals/ensemble.py` | IC-adaptive Kronos + sentiment + macro |
+| **Regime / risk** | `risk/regime_detector.py` | Vol/correlation regime, halt rules |
+| **IC tracker** | `research/ic_tracker.py` | Prediction recording + 5-day IC settlement |
+| **Broker / execution** | `execution/broker_connector.py` | Alpaca paper/live rebalance |
+| **Live dashboard** | `dashboard/app.py` | Streamlit — live pipeline, backtest, IC |
+| **Production runner** | `scripts/run_production.py` | Scheduler + state cache + execution |
+| **Forecast web UI** | `webui/` | Standalone Kronos prediction demo |
+
+### Testing
+
+```bash
+python3 -m pytest tests/ -q -m "not slow"     # unit tests (CI)
+RUN_MODEL_TESTS=1 python3 -m pytest tests/ -q # includes GPU/model tests
+```
+
+GitHub Actions CI (`.github/workflows/ci.yml`) runs unit tests + light health check on push.
+
+### Optional / Advanced (not on main path)
+
+- `execution/algorithmic_execution.py` — TWAP EMS (not started by production runner)
+- `execution/fix_engine.py` — FIX protocol broker (optional)
+- `optimization/` — standalone research utilities (not used by `pipeline/core.py`)
+- `finetune/` — Qlib finetuning (separate from systematic pipeline)
+
+## 🏭 Production Pipeline Features (Legacy Section)
+
+_The content below describes upstream capabilities and design goals. The **Quant Research Pipeline** section above reflects the consolidated codebase._
 
 ### CVXPY Portfolio Optimization
 
 The portfolio construction in `optim/portfolio.py` uses **CVXPY** with the **OSQP solver** (Stanford's Quadratic Programming solver) instead of SciPy's SLSQP. This provides:
 
-- **100x faster convergence** for 150+ asset portfolios
-- **Native absolute value handling** via disciplined convex programming (no more gradient crashes at zero)
-- **Robust constraint satisfaction** for market-neutral (zero net exposure) and gross exposure limits
-- **Automatic fallback** to equal weights if optimization fails
+- **Fast convergence** for 150+ asset portfolios
+- **Native absolute value handling** via disciplined convex programming
+- **Robust constraint satisfaction** for market-neutral and gross exposure limits
 
 ```python
 from optim.portfolio import construct_portfolio
@@ -234,66 +392,51 @@ portfolio = construct_portfolio(
     fundamentals_df=fundamentals_df,
     ohlcv_dict=ohlcv_dict,
     risk_aversion=1.0,
-    l2_penalty=0.5
+    l2_penalty=0.5,
+    prev_weights=prev_weights,
 )
 ```
 
 ### Realistic Transaction Cost Modeling (Slippage)
 
-The `simulator/backtest.py` includes a **5 basis point (0.05%) turnover penalty** per trade side to test alpha survivability under real-world friction:
+The `simulator/backtest.py` includes a **5 basis point (0.05%) turnover penalty** per trade side:
 
 ```python
 from simulator.backtest import WalkForwardBacktest
 
-# 5 bps per side, 20% max intra-month drawdown circuit breaker
 sim = WalkForwardBacktest(
     start_date="2023-01-01",
     end_date="2023-06-01",
     transaction_cost_bps=5.0,
     max_drawdown_pct=20.0,
-    strict_pit=True
+    strict_pit=True,
 )
 results = sim.run()
 ```
 
-The simulator tracks portfolio turnover between rebalancing periods, deducts execution slippage, accurately tracks true daily intra-month drawdowns, and penalizes delisted/bankrupt stocks. If your Sharpe ratio collapses with realistic costs, the alpha wasn't real.
+### Design Goals (Execution & Data)
 
-### Institutional High-Performance Execution
+1. **Survivorship bias** — PIT universe caching via `scripts/build_pit_universe.py`
+2. **Lookahead prevention** — `as_of_date` on signals; OHLCV truncation in backtest
+3. **Execution** — Alpaca paper/live via `execution/broker_connector.py`
+4. **Advanced EMS/FIX** — available under `execution/` for custom integration
 
-Kronos is hardened against the "Five Points of Failure" common in retail algorithmic trading:
-1. **Survivorship Bias Elimination**: Strict Point-in-Time (PIT) universe caching. The simulator will intentionally crash if historical constituents are missing to prevent contaminated backtests (can be overridden with `--allow-fallback`).
-2. **Mathematical Temporal Isolation**: Aggressive timestamp truncation prior to PyTorch inference to prevent the "Time Machine Bug" (lookahead bias).
-3. **Execution Reality (EMS)**: An asynchronous Execution Management System (`execution/algorithmic_execution.py`) that slices large orders using Time-Weighted Average Price (TWAP) without blocking the main event loop.
-4. **Broker Reconciliation & Recovery**: Persistent TWAP state logging allows Kronos to seamlessly recover and resume child order slicing if the host machine reboots unexpectedly.
-5. **FIX Protocol Order Routing**: An optional `AlpacaFixBroker` utilizing `quickfix` for sub-millisecond, institutional-grade order routing over persistent TCP sockets (`execution/fix_engine.py`).
-
-### Key Pipeline Components
+### Key Pipeline Components (Legacy Table)
 
 | Component | Location | Purpose |
 |-----------|----------|---------|
 | **Alpha Generator** | `strategy/kronos_alpha.py` | Kronos model inference + signal generation |
 | **Portfolio Optimizer** | `optim/portfolio.py` | CVXPY mean-variance + Kelly criterion optimization |
-| **Backtest Simulator** | `simulator/backtest.py` | Walk-forward simulation computing realized P&L, Sharpe, and Calmar |
+| **Backtest Simulator** | `simulator/backtest.py` | Walk-forward simulation computing realized P&L |
 | **TCA-Aware Backtest** | `simulator/backtest_tca.py` | Transaction cost analysis + market impact |
 | **Data Ingestion** | `data/ingestion.py` | yFinance integration with Parquet caching |
-| **Corporate Actions** | `data/corporate_actions.py` | Split/dividend adjustments, survivorship bias |
-| **PIT Fundamentals** | `data/pit_database.py` | Point-in-time fundamentals (look-ahead bias prevention) |
-| **Intraday Data** | `data/intraday_fetcher.py` | Hourly/30-min data for intraday signals |
-| **FinBERT Sentiment** | `signal/finbert_sentiment.py` | News sentiment analysis |
-| **Macro Regime** | `signal/macro_regime.py` | VIX/yield curve regime detection |
-| **Signal Ensemble** | `signal/ensemble.py` | Adaptive IC-based signal combination |
-| **Factor Risk Model** | `risk/factor_model.py` | Barra-style multi-factor risk decomposition |
+| **FinBERT Sentiment** | `signals/finbert_sentiment.py` | News sentiment analysis |
+| **Macro Regime** | `signals/macro_regime.py` | VIX/yield curve regime detection |
+| **Signal Ensemble** | `signals/ensemble.py` | Adaptive IC-based signal combination |
 | **Regime Detection** | `risk/regime_detector.py` | Volatility/correlation regime monitoring |
-| **Stress Testing** | `risk/stress_testing.py` | Historical scenario analysis |
-| **Live Trading** | `execution/broker_connector.py` | Alpaca/IBKR integration, VWAP fallback |
-| **Execution Management** | `execution/algorithmic_execution.py` | Async TWAP EMS, Crash Recovery |
-| **FIX Protocol Engine** | `execution/fix_engine.py` | Sub-millisecond institutional order routing |
-| **Market Impact** | `execution/market_impact.py` | Almgren-Chriss impact model |
-| **Alpha Monitor** | `research/alpha_monitor.py` | IC tracking, alpha decay detection |
-| **IC Tracker** | `research/ic_tracker.py` | Information Coefficient (IC) persistence and 5-day horizon settlement |
-| **Live Dashboard** | `dashboard/app.py` | Streamlit monitoring for portfolio, signals, risk, and real execution |
-| **Production Runner** | `scripts/run_production.py` | End-to-end automated live pipeline execution |
-| **Experiment Tracker** | `research/experiment_tracker.py` | MLflow integration, hyperparameter logging |
+| **IC Tracker** | `research/ic_tracker.py` | IC persistence and settlement |
+| **Live Dashboard** | `dashboard/app.py` | Streamlit monitoring |
+| **Production Runner** | `scripts/run_production.py` | Automated pipeline execution |
 
 
 ## 🔧 Finetuning on Your Own Data (A-Share Market Example)

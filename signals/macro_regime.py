@@ -221,10 +221,14 @@ class MacroRegimeDetector:
         
         return state
     
-    def get_current_regime(self) -> RegimeState:
-        """Get current regime (fetch + detect)."""
-        indicators = self.fetch_macro_data()
-        return self.detect_regime(indicators)
+    def get_current_regime(self, as_of_date: Optional[str] = None) -> RegimeState:
+        """Get regime (fetch + detect). Pass as_of_date for backtest PIT."""
+        as_of_dt = pd.Timestamp(as_of_date).to_pydatetime() if as_of_date else None
+        indicators = self.fetch_macro_data(as_of_date=as_of_dt)
+        state = self.detect_regime(indicators)
+        if as_of_dt is not None:
+            state.timestamp = as_of_dt
+        return state
     
     def get_regime_factor_tilts(self, regime: MacroRegime) -> Dict[str, float]:
         """

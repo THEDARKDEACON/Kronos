@@ -2,6 +2,7 @@
 
 from unittest.mock import MagicMock, patch
 
+import pandas as pd
 import pytest
 
 from execution.broker_connector import ExecutionEngine, OrderSide
@@ -31,8 +32,12 @@ def test_rebalance_places_buy_order():
     broker.get_order_status.return_value = {'status': 'filled'}
 
     engine = ExecutionEngine(broker, transaction_cost_bps=5.0)
-    with patch.object(engine, '_estimate_slippage', return_value=0.0):
-        report = engine.rebalance_portfolio({'AAPL': 0.10})
+    with patch("yfinance.download") as mock_download:
+        mock_download.return_value = pd.DataFrame(
+            {"Close": [150.0, 151.0]},
+            index=pd.date_range("2024-01-01", periods=2),
+        )
+        report = engine.rebalance_portfolio({"AAPL": 0.10})
 
     assert report['executed'] >= 1
     order = broker.place_order.call_args[0][0]

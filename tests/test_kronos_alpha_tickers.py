@@ -59,7 +59,7 @@ def test_valid_ticker_list_length_matches_predictions(monkeypatch, sample_ohlcv)
         'cuda': type('C', (), {'amp': type('A', (), {'autocast': staticmethod(lambda **k: __import__('contextlib').nullcontext())})()})()
     })())
 
-    signals = KronosAlphaGenerator.generate_signals(gen, sample_ohlcv, pred_len=2)
+    signals = KronosAlphaGenerator.generate_signals(gen, sample_ohlcv, lookback=100, pred_len=2)
 
     assert len(signals) == captured['n'] == len(sample_ohlcv)
     assert set(signals.index) == set(sample_ohlcv.keys())
