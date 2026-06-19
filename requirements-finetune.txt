@@ -1,0 +1,6 @@
+# Optional: Qlib finetuning path (finetune/)
+#   pip install -r requirements-finetune.txt
+pyqlib
+comet_ml
+tqdm==4.67.1
+matplotlib==3.9.3

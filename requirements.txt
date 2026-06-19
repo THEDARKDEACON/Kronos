@@ -1,44 +1,63 @@
+# =============================================================================
+# Kronos — full install (pipeline + dashboard + backtest + tests)
+#   pip install -r requirements.txt
+#
+# NOT included here (install separately when needed):
+#   webui/          → pip install -r webui/requirements.txt
+#   finetune/       → pip install pyqlib comet_ml
+#   finetune_csv/   → pip install pyyaml
+#   FIX broker      → quickfix (system build deps; optional)
+# =============================================================================
+
+# --- Core data & numerics ---
 numpy
 pandas
-yfinance
 scipy
-lxml
 pyarrow
+lxml
+requests>=2.31.0
+yfinance
+
+# --- Kronos model (Hugging Face) ---
 torch>=2.0.0
 einops==0.8.1
 huggingface_hub==0.33.1
-matplotlib==3.9.3
-tqdm==4.67.1
 safetensors==0.6.2
+tqdm==4.67.1
+matplotlib==3.9.3
+
+# --- Portfolio optimization ---
 cvxpy>=1.3.0
-aiohttp>=3.8.0
+
+# --- Ensemble: FinBERT / sentiment (optional at runtime if no NEWSAPI_KEY) ---
+transformers>=4.30.0
+accelerate>=0.20.0
 onnx>=1.14.0
 onnxruntime>=1.16.0
 
-# Broker APIs (optional - for live trading)
+# --- Async data utilities (data/async_ingestion.py) ---
+aiohttp>=3.8.0
+
+# --- Broker APIs (paper/live; skipped in KRONOS_MODE=dry) ---
 alpaca-trade-api>=3.0.0
 ib-insync>=0.9.70
 
-# NLP and ML for ensemble signals
-transformers>=4.30.0
-accelerate>=0.20.0
+# --- Macro data (optional; FRED_API_KEY) ---
+fredapi>=0.5.0
 
-# Experiment tracking and MLOps
+# --- Research / MLOps (research/experiment_tracker.py) ---
 mlflow>=2.8.0
-requests>=2.31.0
-
-# Data science utilities
 scikit-learn>=1.3.0
 
-# Dashboard visualization
+# --- Dashboard (streamlit run dashboard/app.py) ---
 streamlit>=1.28.0
 plotly>=5.18.0
 streamlit-autorefresh>=0.0.1
 
-# Production runner
+# --- Production runner & ops scripts ---
 schedule>=1.2.0
 python-dotenv>=1.0.0
 psutil>=5.9.0
 
-# Testing
+# --- Testing ---
 pytest>=7.0.0
