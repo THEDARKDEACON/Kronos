@@ -115,8 +115,14 @@ def get_fundamentals(universe_df: pd.DataFrame, as_of_date: Optional[str] = None
     cache_file = os.path.join(CACHE_DIR, f"fundamentals_{target_ts.date()}.parquet")
 
     if os.path.exists(cache_file):
-        print(f"Loading Fundamentals from local Parquet Cache for [{target_ts.date()}]...")
-        return pd.read_parquet(cache_file)
+        df = pd.read_parquet(cache_file)
+        if len(df) > 0:
+            print(f"Loading Fundamentals from local Parquet Cache for [{target_ts.date()}]...")
+            return df
+        print(
+            f"[WARNING] Empty fundamentals cache for [{target_ts.date()}] — refetching "
+            f"({cache_file})"
+        )
 
     print(f"API Fetching PiT fundamentals as of [{target_ts.date()}]...")
     data = []
@@ -129,11 +135,15 @@ def get_fundamentals(universe_df: pd.DataFrame, as_of_date: Optional[str] = None
         for future in concurrent.futures.as_completed(futures):
             data.append(future.result())
 
-    df = pd.DataFrame(data).set_index('Ticker')
-    df = df.dropna(subset=['PE_Ratio', 'Debt_To_Equity'], how='all')
+    if not data:
+        return pd.DataFrame(columns=['Sector', 'PE_Ratio', 'Debt_To_Equity'])
 
-    # Commit to Parquet Lake
-    df.to_parquet(cache_file)
+    df = pd.DataFrame(data).set_index('Ticker')
+    # Keep all tickers — missing PE/debt filled in get_safe_universe; dropping rows
+    # here produced empty caches when Yahoo rate-limits historical quarterly data.
+
+    if len(df) > 0:
+        df.to_parquet(cache_file)
     return df
 
 def get_historical_ohlcv(tickers: List[str], as_of_date: Optional[str] = None, lookback_days: int = 400, incremental: bool = True) -> Dict[str, pd.DataFrame]:

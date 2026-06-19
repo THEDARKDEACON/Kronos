@@ -10,6 +10,10 @@ def get_safe_universe(fundamentals_df: pd.DataFrame, drop_bottom_pct: float = 0.
     
     if df.empty:
         return []
+
+    # If Yahoo returned no usable metrics, skip sector filter (keep full list)
+    if df['PE_Ratio'].isna().all() and df['Debt_To_Equity'].isna().all():
+        return df.index.tolist()
         
     # We want LOW P/E and LOW Debt/Equity
     # Fill missing values with median of their respective sectors so they aren't auto-penalized

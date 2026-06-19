@@ -128,8 +128,20 @@ class WalkForwardBacktest:
                     "Run: python scripts/build_pit_universe.py"
                 ) from None
             seed_universe = get_universe()
-        seed_fundamentals = get_fundamentals(seed_universe, as_of_date=self.start_date if self.strict_pit else None)
+        seed_fundamentals = get_fundamentals(
+            seed_universe.iloc[: max(self.universe_limit * 10, self.universe_limit or 50)]
+            if self.universe_limit and len(seed_universe) > self.universe_limit * 10
+            else seed_universe,
+            as_of_date=self.start_date if self.strict_pit else None,
+        )
         seed_tickers = get_safe_universe(seed_fundamentals, drop_bottom_pct=0.25)
+        if not seed_tickers and len(seed_universe) > 0:
+            cap = self.universe_limit or len(seed_universe)
+            seed_tickers = seed_universe["Ticker"].tolist()[:cap]
+            print(
+                f"   [WARNING] Fundamental filter returned 0 tickers; "
+                f"using {len(seed_tickers)} universe names for OHLCV prefetch"
+            )
         if self.universe_limit:
             seed_tickers = seed_tickers[: self.universe_limit]
         self.seed_tickers = seed_tickers
