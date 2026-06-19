@@ -22,8 +22,8 @@ How it works:
     2. Fetches the historical changes table from Wikipedia (date_added, date_removed).
     3. For each year, reconstructs the constituent set by starting with today's
        list and rolling back additions/removals chronologically.
-    4. Saves one parquet per year to data/cache/sp500_universe_<YYYY>-01-01.parquet
-       (matching the filename pattern that data/ingestion.get_universe() reads).
+    # Saves one parquet per year to data/cache/sp500_universe_<YYYY>-01-01.parquet.
+    # Monthly backtest steps use the nearest on-or-before snapshot via get_universe().
 
 Limitations:
     - Wikipedia's change log only goes back to ~2000 and may have gaps.

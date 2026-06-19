@@ -9,10 +9,51 @@ from datetime import datetime
 
 CACHE_DIR = "data/cache"
 
+
+def _load_pit_universe_snapshot(target_date) -> Optional[pd.DataFrame]:
+    """
+    Load the latest on-or-before PIT universe snapshot for target_date.
+
+    build_pit_universe.py writes annual files (YYYY-01-01). Monthly walk-forward
+    steps resolve to the most recent snapshot not after the as-of date.
+    """
+    exact = os.path.join(CACHE_DIR, f"sp500_universe_{target_date}.parquet")
+    if os.path.exists(exact):
+        print(f"Loading S&P 500 universe from cache for {target_date}...")
+        return pd.read_parquet(exact)
+
+    candidates = []
+    for fname in os.listdir(CACHE_DIR):
+        if not fname.startswith("sp500_universe_") or not fname.endswith(".parquet"):
+            continue
+        date_str = fname[len("sp500_universe_") : -len(".parquet")]
+        try:
+            snap_date = pd.Timestamp(date_str).date()
+        except (ValueError, TypeError):
+            continue
+        if snap_date <= target_date:
+            candidates.append((snap_date, os.path.join(CACHE_DIR, fname)))
+
+    if not candidates:
+        return None
+
+    snap_date, path = max(candidates, key=lambda x: x[0])
+    if snap_date != target_date:
+        print(
+            f"Loading PIT universe snapshot {snap_date} for as-of {target_date} "
+            f"(nearest on-or-before annual snapshot)..."
+        )
+    else:
+        print(f"Loading S&P 500 universe from cache for {target_date}...")
+    return pd.read_parquet(path)
+
+
 def get_universe(as_of_date: Optional[str] = None) -> pd.DataFrame:
     """Fetch S&P 500 constituents from Wikipedia with daily caching.
 
     Enforces strict Point-In-Time (PIT) validation if as_of_date is provided.
+    Uses the nearest on-or-before cached snapshot when an exact-date file is missing
+    (e.g. monthly rebalance dates use annual `build_pit_universe` snapshots).
     """
     import io
     from datetime import date as _date
@@ -20,20 +61,21 @@ def get_universe(as_of_date: Optional[str] = None) -> pd.DataFrame:
     os.makedirs(CACHE_DIR, exist_ok=True)
     
     target_date = pd.Timestamp(as_of_date).date() if as_of_date else _date.today()
-    cache_file = os.path.join(CACHE_DIR, f"sp500_universe_{target_date}.parquet")
 
+    if as_of_date:
+        pit_df = _load_pit_universe_snapshot(target_date)
+        if pit_df is not None:
+            return pit_df
+        raise ValueError(
+            f"DataProvenanceError: Strict PIT enforcement failed. "
+            f"No universe snapshot on or before {target_date}. "
+            f"Run: python scripts/build_pit_universe.py --start-year <year>"
+        )
+
+    cache_file = os.path.join(CACHE_DIR, f"sp500_universe_{target_date}.parquet")
     if os.path.exists(cache_file):
         print(f"Loading S&P 500 universe from cache for {target_date}...")
         return pd.read_parquet(cache_file)
-        
-    if as_of_date:
-        raise ValueError(
-            f"DataProvenanceError: Strict PIT enforcement failed. "
-            f"Missing historical universe cache for {target_date}. "
-            f"Refusing to fall back to future universe to prevent survivorship bias."
-        )
-
-    print("Scraping S&P 500 universe from Wikipedia...")
     url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
     try:
         resp = requests.get(
